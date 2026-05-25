@@ -1,0 +1,10 @@
+# Normalise line endings (silences the LF/CRLF warnings on Windows)
+* text=auto eol=lf
+
+# Treat these as binary
+*.png binary
+*.jpg binary
+*.parquet binary
+
+# Notebooks: keep LF, and help diffs
+*.ipynb text eol=lf

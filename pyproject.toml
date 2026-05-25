@@ -68,7 +68,7 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/TaffyJackson/quant-factor-ranking"
+Repository = "https://github.com/Taff1887/quant-factor-ranking"
 
 [build-system]
 requires = ["hatchling"]
