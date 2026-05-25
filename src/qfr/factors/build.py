@@ -63,7 +63,8 @@ def _price_factors(rebalance: pd.DatetimeIndex) -> pd.DataFrame:
         px.groupby("symbol")["ret_1m"].transform(lambda s: s.rolling(12, min_periods=6).std())
         * np.sqrt(12)
     )
-    cols = ["mom_12_1", "mom_6_1", "mom_3_1", "vol_12m"]
+    px["st_rev"] = -px["ret_1m"]  # short-term reversal: last month's loser = high score
+    cols = ["mom_12_1", "mom_6_1", "mom_3_1", "vol_12m", "st_rev"]
     px[cols] = px[cols].replace([np.inf, -np.inf], np.nan)
     return px[["date", "symbol", *cols]]
 
@@ -163,6 +164,9 @@ def build_factor_panel() -> pd.DataFrame:
         panel[fam] = panel[[c + "_rk" for c in cols]].mean(axis=1)  # skips NaN components
     panel["size_raw_rk"] = cs_rank(cs_winsorize(panel, ["size_raw"]), ["size_raw"])["size_raw"]
     panel["size"] = panel["size_raw_rk"]
+    # Short-term reversal: standalone factor (not in any family composite).
+    panel["st_rev_rk"] = cs_rank(cs_winsorize(panel, ["st_rev"]), ["st_rev"])["st_rev"]
+    panel["reversal"] = panel["st_rev_rk"]
 
     # Re-rank composites to a clean uniform [0,1] within each date.
     rer = cs_rank(panel, fam_cols)
@@ -175,7 +179,7 @@ def build() -> pd.DataFrame:
     panel = build_factor_panel()
     fam_cols = list(FAMILIES) + ["size"]
     keep = ["date", "symbol", "sector", "marketCap", "adjClose",
-            "ret_fwd_1m", "ret_fwd_3m", "ret_fwd_6m", *fam_cols,
+            "ret_fwd_1m", "ret_fwd_3m", "ret_fwd_6m", *fam_cols, "reversal",
             "mom_12_1", "vol_12m"]
     out = panel[keep].sort_values(["date", "symbol"]).reset_index(drop=True)
     write_parquet(out, settings.processed_dir / "factors.parquet")

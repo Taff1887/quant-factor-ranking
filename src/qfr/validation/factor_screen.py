@@ -52,7 +52,7 @@ LABELS = {
     "mom_12_1": "12-1m momentum", "mom_6_1": "6-1m momentum", "mom_3_1": "3-1m momentum",
     "revenueGrowth": "Revenue growth", "epsgrowth": "EPS growth",
     "netIncomeGrowth": "Net-income growth", "ebitdaGrowth": "EBITDA growth",
-    "lowVol": "Low volatility", "size_raw": "Small size",
+    "lowVol": "Low volatility", "size_raw": "Small size", "st_rev": "Short-term reversal (-1m)",
 }
 
 
@@ -65,6 +65,7 @@ def candidate_columns() -> list[tuple[str, str, str]]:
             items.append((fam.capitalize(), "   " + LABELS.get(c, c), c + "_rk"))
     items.append(("Size", "Size (composite)", "size"))
     items.append(("Size", "   " + LABELS["size_raw"], "size_raw_rk"))
+    items.append(("Reversal", LABELS["st_rev"], "st_rev_rk"))
     return items
 
 
