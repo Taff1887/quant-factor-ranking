@@ -1,0 +1,173 @@
+"""Part 3 - Factor construction.
+
+Builds five factor families (Value, Quality, Momentum, Growth, Risk) plus a Size
+control from the clean point-in-time panel.
+
+Construction: each raw component is winsorised (1/99) then converted to a
+**cross-sectional percentile rank within each rebalance date**, oriented so that
+*higher = better / more-exposed*. Family composites are the mean of their
+component ranks, then re-ranked to a clean [0, 1]. Rank-based construction is the
+deliberate choice because the EDA showed the raw inputs are extremely fat-tailed
+(skew in the hundreds), which would let a few names dominate a z-score.
+
+Price-based factors (momentum, volatility) are computed point-in-time from the
+month-end price panel; fundamentals come from ``master_clean`` (already
+filing-date-lagged, so no look-ahead).
+
+Run::
+
+    uv run python -m qfr.factors.build
+
+Output: ``data/processed/factors.parquet``  (date x symbol x factor scores + labels)
+
+NOTE: built on the FMP 2010+ window for now; re-run unchanged on the CRSP panel
+once WRDS access lands (this module reads ``master_clean`` regardless of source).
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from qfr.data.assemble import month_end_price_panel
+from qfr.factors.transforms import cs_rank, cs_winsorize
+from qfr.utils.config import settings
+from qfr.utils.dates import month_end_dates
+from qfr.utils.io import read_parquet, write_parquet
+from qfr.utils.logging import logger
+
+PRIMARY_START = "2010-01-31"  # FMP high-coverage window; CRSP will extend to 2000 later
+
+# Each component is defined/derived so that HIGHER = better (more factor exposure).
+FAMILIES: dict[str, list[str]] = {
+    "value": ["earningsYield", "freeCashFlowYield", "bookToMarket", "salesYield", "ebitdaToEV"],
+    "quality": ["returnOnEquity", "returnOnInvestedCapital", "returnOnAssets",
+                "grossProfitMargin", "operatingProfitMargin", "netProfitMargin",
+                "interestCoverageRatio", "lowLeverage"],
+    "momentum": ["mom_12_1", "mom_6_1", "mom_3_1"],
+    "growth": ["revenueGrowth", "epsgrowth", "netIncomeGrowth", "ebitdaGrowth"],
+    "risk": ["lowVol", "lowLeverage"],
+}
+
+
+def _price_factors(rebalance: pd.DatetimeIndex) -> pd.DataFrame:
+    """Point-in-time momentum and volatility from the month-end price panel."""
+    prices = read_parquet(settings.processed_dir / "prices_long.parquet")
+    px = month_end_price_panel(prices, rebalance).sort_values(["symbol", "date"])
+    g = px.groupby("symbol")["adjClose"]
+    px["ret_1m"] = g.pct_change()
+    px["mom_12_1"] = g.shift(1) / g.shift(12) - 1.0  # 12-1 momentum (skip last month)
+    px["mom_6_1"] = g.shift(1) / g.shift(6) - 1.0
+    px["mom_3_1"] = g.shift(1) / g.shift(3) - 1.0
+    px["vol_12m"] = (
+        px.groupby("symbol")["ret_1m"].transform(lambda s: s.rolling(12, min_periods=6).std())
+        * np.sqrt(12)
+    )
+    cols = ["mom_12_1", "mom_6_1", "mom_3_1", "vol_12m"]
+    px[cols] = px[cols].replace([np.inf, -np.inf], np.nan)
+    return px[["date", "symbol", *cols]]
+
+
+def build() -> pd.DataFrame:
+    m = read_parquet(settings.processed_dir / "master_clean.parquet")
+    rebalance = month_end_dates("2000-01-31", "2026-04-30")
+
+    # Merge price-based factors (computed over full history so momentum has lookback).
+    m = m.merge(_price_factors(rebalance), on=["date", "symbol"], how="left")
+
+    # Derived value yields + oriented helpers (all higher = better).
+    m["bookToMarket"] = 1.0 / m["priceToBookRatio"].replace(0, np.nan)
+    m["salesYield"] = 1.0 / m["priceToSalesRatio"].replace(0, np.nan)
+    m["ebitdaToEV"] = 1.0 / m["evToEBITDA"].replace(0, np.nan)
+    m["lowLeverage"] = -m["debtToEquityRatio"]
+    m["lowVol"] = -m["vol_12m"]
+    m["size_raw"] = -np.log(m["marketCap"].replace(0, np.nan))  # small-cap tilt
+    for c in ["bookToMarket", "salesYield", "ebitdaToEV"]:
+        m[c] = m[c].replace([np.inf, -np.inf], np.nan)
+
+    panel = m[m["investable"] & (m["date"] >= PRIMARY_START)].copy()
+    logger.info(
+        f"factor panel: {len(panel):,} rows, "
+        f"{panel['date'].min().date()}..{panel['date'].max().date()}, "
+        f"{panel['date'].nunique()} months"
+    )
+
+    comps = sorted({c for cols in FAMILIES.values() for c in cols})
+    panel = cs_winsorize(panel, comps)              # tame outliers within date
+    ranks = cs_rank(panel, comps)                   # -> [0,1] percentile within date
+    for c in comps:
+        panel[c + "_rk"] = ranks[c]
+
+    fam_cols = list(FAMILIES) + ["size"]
+    for fam, cols in FAMILIES.items():
+        panel[fam] = panel[[c + "_rk" for c in cols]].mean(axis=1)  # skips NaN components
+    panel["size"] = cs_rank(cs_winsorize(panel, ["size_raw"]), ["size_raw"])["size_raw"]
+
+    # Re-rank composites to a clean uniform [0,1] within each date.
+    rer = cs_rank(panel, fam_cols)
+    for f in fam_cols:
+        panel[f] = rer[f]
+
+    keep = ["date", "symbol", "sector", "marketCap", "adjClose",
+            "ret_fwd_1m", "ret_fwd_3m", "ret_fwd_6m", *fam_cols,
+            "mom_12_1", "vol_12m"]
+    out = panel[keep].sort_values(["date", "symbol"]).reset_index(drop=True)
+    write_parquet(out, settings.processed_dir / "factors.parquet")
+
+    logger.info(f"factors.parquet: {len(out):,} rows | families = {fam_cols}")
+    logger.info("composite coverage (non-null %):\n"
+                + (out[fam_cols].notna().mean() * 100).round(1).to_string())
+    logger.info("family rank correlations:\n" + out[fam_cols].corr().round(2).to_string())
+    return out
+
+
+def make_figures() -> None:
+    """Part 3 figures -> charts/03_*.png."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    from qfr.utils.viz import PALETTE, save_fig, set_plot_style
+
+    set_plot_style()
+    f = read_parquet(settings.processed_dir / "factors.parquet")
+    fams = list(FAMILIES) + ["size"]
+
+    fig, ax = plt.subplots(figsize=(7.5, 6))
+    sns.heatmap(f[fams].corr(), annot=True, fmt=".2f", cmap="vlag", center=0,
+                vmin=-1, vmax=1, square=True, cbar_kws={"label": "rank corr"}, ax=ax)
+    ax.set_title("Factor family correlations (2010+)")
+    save_fig(fig, "03_factor_correlation")
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    for ax, fam in zip(axes.ravel(), fams):
+        d = f.dropna(subset=[fam, "ret_fwd_1m"]).copy()
+        d["q"] = d.groupby("date")[fam].transform(
+            lambda s: pd.qcut(s.rank(method="first"), 5, labels=[1, 2, 3, 4, 5])
+        )
+        sp = d.groupby("q", observed=True)["ret_fwd_1m"].mean() * 100
+        ax.bar([str(i) for i in sp.index], sp.values, color=PALETTE["primary"])
+        ax.axhline(0, color="#444", lw=0.8)
+        ax.set_title(f"{fam}")
+        ax.set_ylabel("mean fwd 1m ret (%)")
+        ax.set_xlabel("quintile (5 = high score)")
+    fig.suptitle("Preview: mean forward 1-month return by factor quintile (full IC analysis in Part 4)",
+                 fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    save_fig(fig, "03_factor_quintile_spread")
+
+    cov = f.groupby("date").size()
+    fig, ax = plt.subplots()
+    ax.plot(cov.index, cov.values, color=PALETTE["primary"], lw=1.5)
+    ax.set_ylim(0, 520)
+    ax.set_title("Investable names with full factor scores per month (2010+)")
+    ax.set_ylabel("number of names")
+    save_fig(fig, "03_factor_coverage")
+
+
+def main() -> None:
+    build()
+    make_figures()
+
+
+if __name__ == "__main__":
+    main()
