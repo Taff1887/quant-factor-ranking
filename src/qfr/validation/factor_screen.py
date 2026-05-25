@@ -156,15 +156,28 @@ def build_screen(panel: pd.DataFrame | None = None) -> pd.DataFrame:
 # columns expressed as percentages for display
 PCT_COLS = ["IC_1m", "IC_2m", "Hit_1m", "Hit_2m", "Act_top", "Act_bot", "Act_LS",
             "TE_top", "TE_bot", "Succ_top", "Succ_bot", "Turn_top", "Turn_bot"]
+TWO_DP_PCT = ["IC_1m", "IC_2m", "Act_top", "Act_bot", "Act_LS"]  # small magnitudes -> 2 dp
+NO_PCT = ["t_1m", "t_2m", "IR_top", "IR_bot"]                    # t-stat / IR: no % sign
 
 
 def to_display(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for c in PCT_COLS:
-        out[c] = (out[c] * 100).round(1)
-    for c in ["t_1m", "t_2m", "IR_top", "IR_bot"]:
+        out[c] = (out[c] * 100).round(2 if c in TWO_DP_PCT else 1)
+    for c in NO_PCT:
         out[c] = out[c].round(2)
     return out
+
+
+def _fmt_cell(col: str, v: float) -> str:
+    """Match the Macquarie sheet: % on every column except t-stat and IR."""
+    if pd.isna(v):
+        return "-"
+    if col in NO_PCT:
+        return f"{v:.2f}"
+    if col in TWO_DP_PCT:
+        return f"{v:.2f}%"
+    return f"{v:.1f}%"
 
 
 def _selected(row: pd.Series) -> bool:
@@ -188,7 +201,7 @@ def _panel(ax, disp: pd.DataFrame, cols: list[str], subhdr: list[str],
         g = row["Group"]
         glabel = "" if g in seen else g
         seen.add(g)
-        vals = [f"{row[c]:.2f}" if c in ("t_1m", "t_2m", "IR_top", "IR_bot") else f"{row[c]:.1f}" for c in cols]
+        vals = [_fmt_cell(c, row[c]) for c in cols]
         text.append([glabel, row["Factor"].strip(), *vals])
 
     collabels = ["Group", "Factor", *subhdr]
