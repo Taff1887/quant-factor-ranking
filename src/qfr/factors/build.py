@@ -68,6 +68,42 @@ def _price_factors(rebalance: pd.DatetimeIndex) -> pd.DataFrame:
     return px[["date", "symbol", *cols]]
 
 
+def _refresh_value_prices(m: pd.DataFrame) -> pd.DataFrame:
+    """Attach ``price_ratio`` = price(period-end) / price(rebalance) to the panel.
+
+    FMP bakes the **period-end** price into its value ratios and holds it stale
+    until the next filing, so the price inside our value signal is ~2-3 months
+    old. Multiplying a yield (earnings/book/sales/FCF over price) by this ratio
+    swaps that stale price for the **live rebalance-date** price, leaving the
+    lagged fundamental untouched. Both legs use the split-adjusted,
+    dividend-UNadjusted close (``prices_raw_long``), so the rescaling is
+    split-safe and free of total-return (dividend) contamination. Rows with no
+    matched price get ``price_ratio`` NaN -> caller falls back to the stale ratio.
+    """
+    sdf = read_parquet(settings.processed_dir / "prices_raw_long.parquet")
+    sdf["date"] = pd.to_datetime(sdf["date"])
+    sdf = sdf.dropna(subset=["splitAdjClose"]).sort_values("date")
+    tol = pd.Timedelta(days=7)
+
+    at_reb = pd.merge_asof(
+        m[["date", "symbol"]].sort_values("date"), sdf,
+        on="date", by="symbol", direction="backward", tolerance=tol,
+    ).rename(columns={"splitAdjClose": "px_now"})
+
+    fe = (m[["symbol", "period_end"]].dropna(subset=["period_end"]).drop_duplicates()
+          .rename(columns={"period_end": "date"}).sort_values("date"))
+    at_fil = pd.merge_asof(
+        fe, sdf, on="date", by="symbol", direction="backward", tolerance=tol,
+    ).rename(columns={"date": "period_end", "splitAdjClose": "px_filing"})
+
+    m = m.merge(at_reb[["date", "symbol", "px_now"]], on=["date", "symbol"], how="left")
+    m = m.merge(at_fil[["symbol", "period_end", "px_filing"]], on=["symbol", "period_end"], how="left")
+    m["price_ratio"] = (
+        (m["px_filing"] / m["px_now"]).replace([np.inf, -np.inf], np.nan).clip(lower=0.1, upper=10.0)
+    )
+    return m
+
+
 def build() -> pd.DataFrame:
     m = read_parquet(settings.processed_dir / "master_clean.parquet")
     rebalance = month_end_dates("2000-01-31", "2026-04-30")
@@ -75,15 +111,31 @@ def build() -> pd.DataFrame:
     # Merge price-based factors (computed over full history so momentum has lookback).
     m = m.merge(_price_factors(rebalance), on=["date", "symbol"], how="left")
 
-    # Derived value yields + oriented helpers (all higher = better).
-    m["bookToMarket"] = 1.0 / m["priceToBookRatio"].replace(0, np.nan)
-    m["salesYield"] = 1.0 / m["priceToSalesRatio"].replace(0, np.nan)
-    m["ebitdaToEV"] = 1.0 / m["evToEBITDA"].replace(0, np.nan)
+    # Refresh the stale period-end price baked into FMP's value ratios to the live
+    # rebalance-date price (see _refresh_value_prices). r = price(filing)/price(now):
+    # a yield = fundamental/price scales by r; market cap scales by 1/r.
+    m = _refresh_value_prices(m)
+    r = m["price_ratio"].fillna(1.0)  # no live price -> keep the original stale ratio
+    mktcap_fresh = m["marketCap"] / r
+    net_debt = m["enterpriseValue"] - m["marketCap"]  # balance-sheet, price-insensitive
+    ev_fresh = mktcap_fresh + net_debt
+
+    # Derived value yields + oriented helpers (all higher = better), live price.
+    m["bookToMarket"] = (1.0 / m["priceToBookRatio"].replace(0, np.nan)) * r
+    m["salesYield"] = (1.0 / m["priceToSalesRatio"].replace(0, np.nan)) * r
+    m["earningsYield"] = m["earningsYield"] * r
+    m["freeCashFlowYield"] = m["freeCashFlowYield"] * r
+    m["ebitdaToEV"] = (1.0 / m["evToEBITDA"].replace(0, np.nan)) * (m["enterpriseValue"] / ev_fresh)
     m["lowLeverage"] = -m["debtToEquityRatio"]
     m["lowVol"] = -m["vol_12m"]
-    m["size_raw"] = -np.log(m["marketCap"].replace(0, np.nan))  # small-cap tilt
-    for c in ["bookToMarket", "salesYield", "ebitdaToEV"]:
+    m["size_raw"] = -np.log(mktcap_fresh.replace(0, np.nan))  # small-cap tilt (fresh mkt cap)
+    m["marketCap"] = mktcap_fresh  # carry the live market cap downstream (Part 7 weights)
+    for c in ["bookToMarket", "salesYield", "ebitdaToEV", "earningsYield", "freeCashFlowYield"]:
         m[c] = m[c].replace([np.inf, -np.inf], np.nan)
+
+    _cov = m.loc[m["date"] >= PRIMARY_START, "price_ratio"]
+    logger.info(f"value-price refresh: {_cov.notna().mean():.1%} of 2010+ rows got a live price; "
+                f"price_ratio median={_cov.median():.3f}, IQR=[{_cov.quantile(.25):.3f}, {_cov.quantile(.75):.3f}]")
 
     panel = m[m["investable"] & (m["date"] >= PRIMARY_START)].copy()
     logger.info(

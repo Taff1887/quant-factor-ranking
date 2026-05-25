@@ -1,9 +1,15 @@
 """Adjusted daily price assembly from the FMP stable API.
 
 We use the ``dividend-adjusted`` EOD series so that ``adjClose`` reflects both
-splits and dividends — the correct basis for computing total returns. FMP caps
-this endpoint at ~5,000 daily bars per request (~20 years), which fully covers a
-backtest starting in 2008 for both surviving and delisted names.
+splits and dividends — the correct basis for computing total **returns** (the
+``adjClose`` is a total-return index, not a price level).
+
+For value-factor *levels* we also pull the ``full`` series, whose ``close`` is
+**split-adjusted (to today's basis) but NOT dividend-adjusted** — i.e. an actual
+price level, comparable across splits. That lets us refresh value ratios with the
+live rebalance-date price instead of the stale period-end price FMP bakes into
+its ratios (see ``qfr.factors.build``). FMP caps these endpoints at ~5,000 daily
+bars per request (~20 years), which fully covers the 2010+ analysis window.
 """
 
 from __future__ import annotations
@@ -100,3 +106,47 @@ def fetch_prices_long(
     out["date"] = pd.to_datetime(out["date"])
     keep = [c for c in PRICE_COLS if c in out.columns]
     return out[keep].sort_values(["symbol", "date"]).reset_index(drop=True)
+
+
+def fetch_split_adjusted_close(
+    symbols: Iterable[str],
+    client: FMPClient | None = None,
+    *,
+    from_date: str = "2009-01-01",
+    to_date: str | None = None,
+    log_every: int = 100,
+) -> pd.DataFrame:
+    """Pull the ``full``-series ``close`` (split-adjusted, dividend-UNadjusted).
+
+    Unlike ``adjClose`` (a total-return index), this ``close`` is an actual price
+    *level* back-adjusted only for splits, so it is comparable to FMP's
+    per-share fundamentals and period-end ``stockPrice`` (also split-adjusted to
+    today). Used to refresh value ratios to the live rebalance-date price.
+
+    One request per symbol (the 2009+ window is < 5,000 bars, under the cap).
+    Returns ``[symbol, date, splitAdjClose]`` sorted by ``[symbol, date]``.
+    """
+    client = client or FMPClient()
+    symbols = list(symbols)
+    frames: list[pd.DataFrame] = []
+    n = len(symbols)
+    for i, sym in enumerate(symbols, 1):
+        try:
+            rows = client.historical_prices(sym, from_date=from_date, to_date=to_date, series="full")
+        except Exception as e:  # noqa: BLE001 - log and continue the bulk pull
+            logger.warning(f"split-adj prices {sym}: {e}")
+            rows = []
+        if rows:
+            df = pd.DataFrame(rows)
+            if "close" in df.columns:
+                df = df[["date", "close"]].copy()
+                df["symbol"] = sym
+                frames.append(df)
+        if i % log_every == 0:
+            logger.info(f"split-adj prices: {i}/{n} symbols")
+    if not frames:
+        return pd.DataFrame(columns=["symbol", "date", "splitAdjClose"])
+    out = pd.concat(frames, ignore_index=True)
+    out["date"] = pd.to_datetime(out["date"])
+    out = out.rename(columns={"close": "splitAdjClose"})
+    return out[["symbol", "date", "splitAdjClose"]].sort_values(["symbol", "date"]).reset_index(drop=True)

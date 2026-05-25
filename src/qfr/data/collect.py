@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from qfr.data.fmp_client import FMPClient
 from qfr.data.fundamentals import STATEMENT_METHODS, fetch_profiles, fetch_statement_long
-from qfr.data.prices import fetch_prices_long
+from qfr.data.prices import fetch_prices_long, fetch_split_adjusted_close
 from qfr.data.universe import all_symbols, build_universe
 from qfr.utils.config import settings
 from qfr.utils.dates import month_end_dates
@@ -55,6 +55,12 @@ def main() -> None:
     )
     write_parquet(prices, out / "prices_long.parquet")
     logger.info(f"prices_long: {len(prices):,} rows -> {prices['symbol'].nunique() if len(prices) else 0} symbols")
+
+    # 2b) Split-adjusted (dividend-unadjusted) close — actual price levels for
+    #     refreshing value ratios to the live rebalance date (2010+ window).
+    raw_close = fetch_split_adjusted_close(symbols, client=client, from_date="2009-01-01", to_date=UNIVERSE_END)
+    write_parquet(raw_close, out / "prices_raw_long.parquet")
+    logger.info(f"prices_raw_long: {len(raw_close):,} rows -> {raw_close['symbol'].nunique() if len(raw_close) else 0} symbols")
 
     # 3) Fundamentals (7 quarterly datasets) ------------------------------
     for kind in STATEMENT_METHODS:
