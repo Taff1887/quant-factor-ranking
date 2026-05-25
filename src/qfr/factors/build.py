@@ -104,7 +104,15 @@ def _refresh_value_prices(m: pd.DataFrame) -> pd.DataFrame:
     return m
 
 
-def build() -> pd.DataFrame:
+def build_factor_panel() -> pd.DataFrame:
+    """Construct the full factor panel: component ranks + family composites.
+
+    Returns the 2010+ investable panel carrying each winsorised component rank
+    (``<comp>_rk``), the six family composites + ``size`` (re-ranked to a clean
+    [0,1] within date), plus labels and forward returns. ``build`` writes the
+    family-level slice to ``factors.parquet``; ``qfr.validation.factor_screen``
+    reuses the component ranks for the granular factor screen.
+    """
     m = read_parquet(settings.processed_dir / "master_clean.parquet")
     rebalance = month_end_dates("2000-01-31", "2026-04-30")
 
@@ -153,13 +161,19 @@ def build() -> pd.DataFrame:
     fam_cols = list(FAMILIES) + ["size"]
     for fam, cols in FAMILIES.items():
         panel[fam] = panel[[c + "_rk" for c in cols]].mean(axis=1)  # skips NaN components
-    panel["size"] = cs_rank(cs_winsorize(panel, ["size_raw"]), ["size_raw"])["size_raw"]
+    panel["size_raw_rk"] = cs_rank(cs_winsorize(panel, ["size_raw"]), ["size_raw"])["size_raw"]
+    panel["size"] = panel["size_raw_rk"]
 
     # Re-rank composites to a clean uniform [0,1] within each date.
     rer = cs_rank(panel, fam_cols)
     for f in fam_cols:
         panel[f] = rer[f]
+    return panel
 
+
+def build() -> pd.DataFrame:
+    panel = build_factor_panel()
+    fam_cols = list(FAMILIES) + ["size"]
     keep = ["date", "symbol", "sector", "marketCap", "adjClose",
             "ret_fwd_1m", "ret_fwd_3m", "ret_fwd_6m", *fam_cols,
             "mom_12_1", "vol_12m"]
