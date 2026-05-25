@@ -1,0 +1,41 @@
+old_ticker,mapped_ticker,company_name,reason,confidence,source,notes
+DOW,DOW,Dow Inc,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=86; clipped to <= membership_end
+FOXA,FOXA,Fox Corporation (Class A),"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=86; clipped to <= membership_end
+MOLX,MOLX,Molex Inc.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=168; clipped to <= membership_end
+DELL,DELL,Dell Technologies,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=117; clipped to <= membership_end
+GR,GR,Goodrich Corp.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=138; clipped to <= membership_end
+CEG,CEG,Constellation Energy Corp,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=52; clipped to <= membership_end
+TLAB,TLAB,Tellabs Inc.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=144; clipped to <= membership_end
+RSH,RSH,RadioShack Corp.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=31; clipped to <= membership_end
+CBE,CBE,Cooper Industries plc,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=155; clipped to <= membership_end
+Q,Q,Qnity Electronics Inc,"same ticker, Yahoo series overlaps membership window",medium,yahoo,overlap_months=7; clipped to <= membership_end
+KG,KG,King Pharmaceuticals Inc.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=31; clipped to <= membership_end
+SNDK,SNDK,Sandisk Corporation,"same ticker, Yahoo series overlaps membership window",medium,yahoo,overlap_months=15; clipped to <= membership_end
+GM,GM,General Motors Co,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=186; clipped to <= membership_end
+PBG,PBG,Pepsi Bottling Group Inc.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=66; clipped to <= membership_end
+CFC,CFC,Countrywide Financial Corp.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=91; clipped to <= membership_end
+CZR,CZR,Caesars Entertainment,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=132; clipped to <= membership_end
+BOL,BOL,Bausch & Lomb Inc.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=94; clipped to <= membership_end
+HLT,HLT,Hilton Worldwide Holdings Inc.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=149; clipped to <= membership_end
+DG,DG,Dollar General Corp,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=198; clipped to <= membership_end
+CMVT,CMVT,Comverse Technology Inc,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=86; clipped to <= membership_end
+CPWR,CPWR,Compuware Corp,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=60; clipped to <= membership_end
+HCA,HCA,HCA Holdings Inc,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=182; clipped to <= membership_end
+GDW,GDW,Golden West Financial,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=42; clipped to <= membership_end
+KMI,KMI,Kinder Morgan Inc,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=183; clipped to <= membership_end
+CIN,CIN,Cinergy Corp.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=75; clipped to <= membership_end
+BR,BR,Broadridge Financial Solutions Inc,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=230; clipped to <= membership_end
+UVN,UVN,Univision Comm Inc,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=73; clipped to <= membership_end
+GENZ,GENZ,Genzyme Corp.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=39; clipped to <= membership_end
+PSKY,PSKY,Paramount Skydance Corp,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=245; clipped to <= membership_end
+DAL,DAL,Delta Air Lines Inc,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=228; clipped to <= membership_end
+GLK,GLK,Great Lakes Chemical Corp,"same ticker, Yahoo series overlaps membership window",medium,yahoo,overlap_months=18; clipped to <= membership_end
+TIE,TIE,Titanium Metal Corp,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=62; clipped to <= membership_end
+CF,CF,CF Industries Holdings Inc.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=249; clipped to <= membership_end
+MEE,MEE,Massey Energy Co.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=43; clipped to <= membership_end
+SII,SII,Smith Int'l Inc,"same ticker, Yahoo series overlaps membership window",medium,yahoo,overlap_months=6; clipped to <= membership_end
+CE,CE,Celanese,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=242; clipped to <= membership_end
+KHC,KHC,Kraft Heinz Co,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=130; clipped to <= membership_end
+BDX,BDX,Becton Dickinson & Co,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=317; clipped to <= membership_end
+EP,EP,El Paso Corp.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=149; clipped to <= membership_end
+TDC,TDC,Teradata Corp.,"same ticker, Yahoo series overlaps membership window",high,yahoo,overlap_months=116; clipped to <= membership_end
