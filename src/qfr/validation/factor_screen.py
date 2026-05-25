@@ -167,92 +167,89 @@ def to_display(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _shade(col: str, v: float) -> str | None:
-    """Green = desirable, red = adverse, for the headline cells."""
-    if pd.isna(v):
-        return None
-    if col in ("t_1m", "t_2m"):
-        if v >= 1.5:
-            return "#bfe3c0"
-        if v >= 1.0:
-            return "#e4f3e0"
-        if v <= -1.0:
-            return "#f4c9c4"
-    if col in ("IC_1m", "IC_2m"):
-        if v >= 0.8:
-            return "#bfe3c0"
-        if v <= -0.5:
-            return "#f4c9c4"
-    if col == "IR_top":
-        if v >= 0.30:
-            return "#bfe3c0"
-        if v <= -0.15:
-            return "#f4c9c4"
-    if col == "IR_bot":  # a good factor's BOTTOM quintile should underperform (IR_bot < 0)
-        if v <= -0.20:
-            return "#bfe3c0"
-        if v >= 0.20:
-            return "#f4c9c4"
-    if col == "Act_LS":
-        if v >= 2.0:
-            return "#bfe3c0"
-        if v <= -1.0:
-            return "#f4c9c4"
-    return None
+def _selected(row: pd.Series) -> bool:
+    """Macquarie-style highlight: significant 1m/2m rank IC and/or a strong top IR."""
+    return bool((row["t_1m"] >= 1.5) or (row["t_2m"] >= 1.5) or (row["IR_top"] >= 0.30))
 
 
-def _render(ax, disp: pd.DataFrame, cols: list[str], hdr: list[str], title: str) -> None:
+def _panel(ax, disp: pd.DataFrame, cols: list[str], subhdr: list[str],
+           spans: list[tuple[str, int, int]], colw: list[float], title: str) -> None:
+    """Render one Macquarie-style sub-table with a Group column + spanning headers."""
     ax.axis("off")
-    ax.set_title(title, fontsize=10.5, fontweight="bold", loc="left", pad=8)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_title(title, fontsize=10.5, fontweight="bold", loc="left", pad=34)
+
     is_comp = disp["Factor"].str.contains("composite").to_numpy()
-    text, colours = [], []
+    sel = disp.apply(_selected, axis=1).to_numpy()
+    seen: set[str] = set()
+    text = []
     for _, row in disp.iterrows():
-        trow, crow = [row["Factor"]], ["none"]
-        for c in cols:
-            v = row[c]
-            trow.append(f"{v:.2f}" if c in ("t_1m", "t_2m", "IR_top", "IR_bot") else f"{v:.1f}")
-            crow.append(_shade(c, v) or "white")
-        text.append(trow)
-        colours.append(crow)
-    tbl = ax.table(cellText=text, colLabels=["Factor", *hdr], cellLoc="center", loc="center")
+        g = row["Group"]
+        glabel = "" if g in seen else g
+        seen.add(g)
+        vals = [f"{row[c]:.2f}" if c in ("t_1m", "t_2m", "IR_top", "IR_bot") else f"{row[c]:.1f}" for c in cols]
+        text.append([glabel, row["Factor"].strip(), *vals])
+
+    collabels = ["Group", "Factor", *subhdr]
+    tbl = ax.table(cellText=text, colLabels=collabels, colWidths=colw,
+                   cellLoc="center", bbox=[0, 0, 1.0, 0.86])
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(8)
-    tbl.scale(1, 1.32)
-    ncol = len(cols) + 1
-    for j in range(ncol):  # header row
-        cell = tbl[0, j]
-        cell.set_facecolor("#2b3a55")
-        cell.set_text_props(color="white", fontweight="bold")
-    for i in range(len(text)):
+    tbl.set_fontsize(7.5)
+    ncol = len(collabels)
+    for j in range(ncol):  # sub-header row
+        c = tbl[0, j]
+        c.set_facecolor("#2b3a55")
+        c.set_text_props(color="white", fontweight="bold")
+    for i in range(len(text)):  # data rows
+        bg = "#d9dee8" if is_comp[i] else ("#eef0f4" if sel[i] else "white")
         for j in range(ncol):
-            cell = tbl[i + 1, j]
-            cell.set_facecolor(colours[i][j] if j > 0 else ("#dfe3ea" if is_comp[i] else "white"))
-            if j == 0:
-                cell.set_text_props(ha="left", fontweight="bold" if is_comp[i] else "normal")
+            c = tbl[i + 1, j]
+            c.set_facecolor(bg)
+            if j <= 1:
+                c.set_text_props(ha="left", fontweight="bold" if (is_comp[i] or j == 0) else "normal")
             elif is_comp[i]:
-                cell.set_text_props(fontweight="bold")
-    tbl.auto_set_column_width([0])
+                c.set_text_props(fontweight="bold")
+
+    cum = np.concatenate([[0.0], np.cumsum(colw)])
+    cum = cum / cum[-1]  # table spans the full axes width
+    for label, a, b in spans:
+        xL, xR = cum[a], cum[b + 1]
+        ax.text((xL + xR) / 2, 0.95, label, ha="center", va="center",
+                fontsize=9.5, fontweight="bold", color="#2b3a55")
+        ax.plot([xL + 0.004, xR - 0.004], [0.905, 0.905], color="#2b3a55", lw=1.1, clip_on=False)
 
 
 def make_figures(disp: pd.DataFrame) -> None:
-    """Two-panel screen table -> charts/04b_factor_screen.png (Macquarie layout)."""
+    """Two-panel Macquarie-style screen table -> charts/04b_factor_screen.png."""
     import matplotlib.pyplot as plt
 
     from qfr.utils.viz import save_fig, set_plot_style
 
     set_plot_style()
     a_cols = ["IC_1m", "IC_2m", "Hit_1m", "Hit_2m", "t_1m", "t_2m", "Act_top", "Act_bot", "Act_LS"]
-    a_hdr = ["IC 1m", "IC 2m", "Hit 1m", "Hit 2m", "t 1m", "t 2m", "Act Top", "Act Bot", "Act T-B"]
-    b_cols = ["TE_top", "TE_bot", "IR_top", "IR_bot", "Succ_top", "Succ_bot", "Turn_top", "Turn_bot"]
-    b_hdr = ["TE Top", "TE Bot", "IR Top", "IR Bot", "Succ Top", "Succ Bot", "Turn Top", "Turn Bot"]
+    a_sub = ["Lag 1m", "Lag 2m", "Lag 1m", "Lag 2m", "Lag 1m", "Lag 2m", "Top", "Bottom", "Top-Bottom"]
+    a_spans = [("Avg Rank IC", 2, 3), ("Hit Rate", 4, 5), ("t-stat", 6, 7), ("Active Return", 8, 10)]
+    a_w = [0.11, 0.23] + [0.66 / 9] * 9
 
-    fig, (axA, axB) = plt.subplots(2, 1, figsize=(15.5, 18))
-    _render(axA, disp, a_cols, a_hdr,
-            "The final factor screen — SIGNAL (2010+, gross): rank IC %, hit-rate %, t-stat, active return (ann. %)")
-    _render(axB, disp, b_cols, b_hdr,
-            "…PORTFOLIO (top/bottom quintile vs equal-weight universe): tracking error %, info ratio, monthly success %, one-way turnover %")
-    fig.text(0.5, 0.005, "green = desirable (significant IC / strong IR / wide top-bottom), red = adverse · bold = family composite",
-             ha="center", fontsize=8.5, style="italic", color="#555")
+    b_cols = ["TE_top", "TE_bot", "IR_top", "IR_bot", "Succ_top", "Succ_bot", "Turn_top", "Turn_bot"]
+    b_sub = ["Top", "Bottom", "Top", "Bottom", "Top", "Bottom", "Top", "Bottom"]
+    b_spans = [("Tracking Error", 2, 3), ("Information Ratio", 4, 5),
+               ("Monthly Success Rate", 6, 7), ("Avg Turnover", 8, 9)]
+    b_w = [0.11, 0.23] + [0.66 / 8] * 8
+
+    fig, (axA, axB) = plt.subplots(2, 1, figsize=(16, 20))
+    fig.suptitle("Summary sheet of factor performance statistics - S&P 500 (2010-2026)",
+                 fontsize=15, fontweight="bold", y=0.995)
+    _panel(axA, disp, a_cols, a_sub, a_spans, a_w,
+           "Signal: average rank IC %, hit rate % (months IC>0) and t-stat; active return ann. % (gross)")
+    _panel(axB, disp, b_cols, b_sub, b_spans, b_w,
+           "Portfolio: top/bottom quintile vs equal-weight universe - tracking error %, information ratio, monthly success %, one-way turnover %")
+    fig.text(0.5, 0.018,
+             "Highlighted = factors that fit the criteria: high & significant 1m/2m rank ICs, well-distinguished top/bottom fractiles, lower turnover."
+             "   Bold = family composite.   Source: qfr factor screen, 2010-2026 (gross, quintiles).",
+             ha="center", fontsize=9, style="italic", color="#555")
+    fig.subplots_adjust(top=0.94, bottom=0.05, hspace=0.16)
     save_fig(fig, "04b_factor_screen")
 
 
