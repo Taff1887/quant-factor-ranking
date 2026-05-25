@@ -59,17 +59,22 @@ quant-factor-ranking/
 └── requirements.txt
 ```
 
-## Notebooks (the research narrative)
+## The research narrative — `notebooks/research.ipynb`
 
-| # | Notebook | Stage |
-|---|---|---|
-| 01 | `01_data_collection.ipynb` | Universe, prices, fundamentals, coverage audit |
-| 02 | `02_eda.ipynb` | Distributions, outliers, correlations |
-| 03 | `03_factor_engineering.ipynb` | Factor construction & intuition |
-| 04 | `04_factor_validation.ipynb` | IC, rank IC, decay, redundancy |
-| 05 | `05_model_building.ipynb` | Baselines + ML ranking models |
-| 06 | `06_backtesting.ipynb` | Walk-forward backtest |
-| 07 | `07_portfolio_analysis.ipynb` | Performance, exposures, attribution |
+The whole study lives in **one consolidated, executed notebook** so you can open a single file and
+read the entire story top to bottom. Each stage carries its own *data collection* and *data
+validation* before analysis. Heavy computation lives in `src/qfr/`; the notebook loads and displays
+the results.
+
+| Section | Stage |
+|---|---|
+| 1 | Data collection & the point-in-time dataset |
+| 1b | Independent data validation (FMP vs Yahoo Finance) |
+| 2 | Exploratory data analysis |
+| 3–8 | Factors → validation → models → portfolio → paper *(in progress)* |
+
+Pipeline modules: `qfr.data.collect` → `qfr.data.assemble` → `qfr.data.validate_yahoo` →
+`qfr.data.clean` → `qfr.eda`.
 
 ## Quick start
 
