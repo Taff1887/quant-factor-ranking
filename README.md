@@ -244,14 +244,78 @@ The monthly time series shows the IC is positive on a ~56 % hit rate but with me
 
 Artefacts: [`reports/composite_rank_ic_horizons.csv`](reports/composite_rank_ic_horizons.csv), [`reports/composite_ic_decay.csv`](reports/composite_ic_decay.csv), [`reports/composite_rank_ic_monthly.csv`](reports/composite_rank_ic_monthly.csv).
 
-### 6.3 Two layers of weighting (distinct)
+### 6.3 Composite weighting variants — does letting strong factors do more work help?
+
+The baseline composite equal-weights the 5 factors at 20 % each. A natural next question is **should we tilt the composite toward factors with stronger individual signals?** The standard institutional schemes are:
+
+| Scheme | Rule | Notes |
+|---|---|---|
+| **EW** (baseline) | wₖ = 1/N | No estimation error; the textbook default |
+| **IC-weighted** | wₖ ∝ mean(ICₖ) | Tilts toward stronger raw signals; sensitive to lookback |
+| **IC-IR weighted** | wₖ ∝ mean(ICₖ)/std(ICₖ); shrunk 50 % to EW | Penalises noisy signals; institutional standard |
+| **t² weighted** | wₖ ∝ tₖ²; shrunk 50 % to EW | Stambaugh-style; more aggressive penalisation of noise |
+
+**Implementation discipline** (this matters as much as the formula itself):
+
+- Weights at month *t* use only IC data through month *t-1* — strictly no look-ahead
+- Trailing 36-month estimation window
+- Quarterly weight rebalance (not monthly — reduces estimation churn)
+- 50 % shrinkage of the non-EW schemes toward EW (institutional default; raw IC scheme presented un-shrunk so the contrast is visible)
+- Out-of-sample evaluation starts at **2012-04** (after sufficient trailing history)
+
+**Average factor weights over the OOS window** (the data-driven schemes do correctly tilt toward FCF yield, which had the highest individual t-stat, and away from EPS growth, which had the lowest):
+
+| Scheme | ROIC | ROE | FCF yield | Rev growth | EPS growth |
+|---|---|---|---|---|---|
+| EW | 20.0 % | 20.0 % | 20.0 % | 20.0 % | 20.0 % |
+| IC-weighted | 26.2 % | 21.7 % | **30.1 %** | 13.1 % | 9.0 % |
+| IC-IR (50 % shrunk) | 21.0 % | 21.3 % | 25.0 % | 16.9 % | 15.8 % |
+| t² (50 % shrunk) | 20.3 % | 21.2 % | 27.4 % | 16.1 % | 14.9 % |
+
+![Composite variant weights over time](charts/composite_variants_weights.png)
+
+#### Result: EW wins on every metric
+
+| Scheme | IC 1m | t (1m) | IC 3m | t (3m) | IC 12m | t (12m) | TopQ CW α | LS EW α |
+|---|---|---|---|---|---|---|---|---|
+| **EW (baseline)** | **1.74 %** | **2.87** | **3.00 %** | **4.76** | **2.40 %** | **4.51** | **+1.61 %** | **+4.37 %** |
+| IC-weighted (no shrink) | 1.29 % | 1.88 | 1.77 % | 2.32 | 1.62 % | 2.26 | +1.30 % | +2.89 % |
+| IC-IR (50 % shrunk) | 1.57 % | 2.51 | 2.46 % | 3.59 | 1.94 % | 3.22 | +1.34 % | +3.38 % |
+| t² (50 % shrunk) | 1.53 % | 2.42 | 2.37 % | 3.43 | 2.11 % | 3.40 | +0.89 % | +3.14 % |
+
+![Composite variants IC comparison](charts/composite_variants_ic.png)
+
+![Composite variants cumulative growth](charts/composite_variants_cumulative.png)
+
+#### Why this is the *right* result (not a disappointing one)
+
+This validates the institutional EW baseline as the correct choice and is consistent with **DeMiguel, Garlappi & Uppal (2009, "Optimal vs naive diversification")**, which shows that with realistic estimation error 1/N is hard to beat by data-driven optimisation. The mechanism here:
+
+1. **Estimation noise dominates signal-strength differences.** With only 5 factors and a 36-month trailing window, the IC-IR estimates have standard errors of the same order of magnitude as the underlying IR differences. The "tilt" is mostly fitting noise.
+2. **The raw IC-weighted scheme is the worst** — exactly as theory predicts, because it has no shrinkage. The 50 %-shrunk variants do better but still don't catch EW.
+3. **The IC of the EW composite is actually higher than the IC of any of the data-driven blends on every horizon.** Tilting *away* from balanced exposure across uncorrelated signals destroys diversification benefit.
+
+This is the same finding institutional shops report: shrinkage-heavy weighting can add value when you have **many** factors (15-30+) and **long** histories (10+ years). For a focused 5-factor composite, EW is the right call.
+
+What you'd need to make data-driven weighting beat EW here:
+
+- A larger factor universe (more independent signals → more dispersion in IR estimates that's actually signal rather than noise)
+- Longer history per factor (smaller standard error on IR estimates)
+- A more aggressive shrinkage policy (75-90 % shrunk would likely close the remaining gap on this universe)
+- Or alternatively, a **regime-conditional** weighting (e.g., tilt toward quality in late-cycle regimes) — which is real but adds another layer of model risk
+
+The honest framing on the final model: **EW remains the composite of record**. The data-driven variants are documented as a methodology check and shown to under-perform on this universe, not deployed.
+
+Artefacts: [`reports/composite_variants_ic.csv`](reports/composite_variants_ic.csv), [`reports/composite_variants_summary.csv`](reports/composite_variants_summary.csv), [`reports/composite_variants_avg_weights.csv`](reports/composite_variants_avg_weights.csv). Code: [`src/qfr/backtest/composite_variants.py`](src/qfr/backtest/composite_variants.py).
+
+### 6.4 Two layers of weighting (distinct)
 
 | Layer | Controls | Choice |
 |---|---|---|
-| Factor → composite | how much each of the 5 factors counts toward each stock's score | equal-weight z-scores (20 % each) |
+| Factor → composite | how much each of the 5 factors counts toward each stock's score | equal-weight z-scores (20 % each) — see §6.3 for tested alternatives |
 | Stocks → portfolio | how much each stock in the chosen bucket counts toward portfolio P&L | EW (1/N per name) or CW (∝ market cap) — both tested |
 
-### 6.4 Portfolio variants
+### 6.5 Portfolio variants
 
 | Variant | Long | Short | Stock weighting | Net exposure |
 |---|---|---|---|---|
@@ -264,7 +328,7 @@ Artefacts: [`reports/composite_rank_ic_horizons.csv`](reports/composite_rank_ic_
 
 Monthly rebalanced, **10 bps per side** on traded notional (so a name fully turning over costs 20 bps round-trip on long-only and 40 bps on long-short).
 
-### 6.5 CAPM α (Jensen's alpha)
+### 6.6 CAPM α (Jensen's alpha)
 
 For each variant, we fit `r_strategy(t) = α + β × r_SPY(t) + ε(t)` by OLS over the monthly series and annualise α (×12). β isolates the market-beta drag; α is the part of return not explained by market exposure. r_f is treated as 0; with r_f ~ 1.5 % the LS α figures would tighten by ~1.5 %, all still positive.
 
@@ -490,8 +554,12 @@ uv run python -m qfr.validation.factor_screen
 
 # 6. Portfolio backtest vs SPY
 #    Long-only (4) + LS dollar-neutral (4) + LS beta-neutral + LS sector-neutral
-#    Plus cost sensitivity, gross/net, turnover analysis
+#    Plus cost sensitivity, gross/net, turnover analysis, composite rank IC
 uv run python -m qfr.backtest.portfolio
+
+# 7. (Optional) Composite weighting variants
+#    EW vs IC vs IC-IR vs t-squared, with strict no-look-ahead and shrinkage
+uv run python -m qfr.backtest.composite_variants
 ```
 
 ---
