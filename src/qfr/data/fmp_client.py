@@ -190,3 +190,14 @@ class FMPClient:
 
     def financial_growth(self, symbol, period="quarter", limit=400, *, force_refresh=None):
         return self._statement("financial-growth", symbol, period, limit, force_refresh)
+
+    # -- analyst sentiment -------------------------------------------------
+    def grades(self, symbol, *, force_refresh=None) -> list[dict]:
+        """Dated log of individual analyst rating actions (upgrade/downgrade/...).
+
+        Point-in-time safe: each row carries the action ``date``, plus
+        ``previousGrade``/``newGrade``/``action``/``gradingCompany``. Used to build
+        a recommendation-revision factor. (Unlike ``analyst-estimates``, which is a
+        forward snapshot and not look-ahead-free.)
+        """
+        return self.get("grades", params={"symbol": symbol}, force_refresh=force_refresh) or []

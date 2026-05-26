@@ -53,6 +53,8 @@ LABELS = {
     "revenueGrowth": "Revenue growth", "epsgrowth": "EPS growth",
     "netIncomeGrowth": "Net-income growth", "ebitdaGrowth": "EBITDA growth",
     "lowVol": "Low volatility", "size_raw": "Small size", "st_rev": "Short-term reversal (-1m)",
+    "rating_rev_3m": "Rating revision 3m", "rating_rev_6m": "Rating revision 6m",
+    "rating_breadth_12m": "Rating breadth 12m",
 }
 
 

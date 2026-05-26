@@ -30,7 +30,7 @@ from qfr.utils.config import PROJECT_ROOT, settings
 from qfr.utils.io import read_parquet
 from qfr.utils.logging import logger
 
-FACTORS = ["value", "quality", "momentum", "growth", "risk", "size"]
+FACTORS = ["value", "quality", "momentum", "growth", "risk", "sentiment", "size"]
 HORIZONS = (1, 3, 6)
 MIN_NAMES = 20  # need a reasonable cross-section to compute a meaningful IC
 

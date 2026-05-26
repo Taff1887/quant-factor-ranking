@@ -47,6 +47,7 @@ FAMILIES: dict[str, list[str]] = {
     "momentum": ["mom_12_1", "mom_6_1", "mom_3_1"],
     "growth": ["revenueGrowth", "epsgrowth", "netIncomeGrowth", "ebitdaGrowth"],
     "risk": ["lowVol", "lowLeverage"],
+    "sentiment": ["rating_rev_3m", "rating_rev_6m", "rating_breadth_12m"],  # analyst rec. revisions
 }
 
 
@@ -105,6 +106,56 @@ def _refresh_value_prices(m: pd.DataFrame) -> pd.DataFrame:
     return m
 
 
+def _rating_factors(rebalance: pd.DatetimeIndex) -> pd.DataFrame:
+    """Point-in-time analyst recommendation-revision factors from the dated grade log.
+
+    For each rebalance date, per symbol: upgrades minus downgrades over a trailing
+    3m and 6m window, plus a 12-month breadth ratio (net / total actions) - using
+    only actions on or before that date (look-ahead-free). Coverage begins ~2012,
+    so values are NaN before a name's first logged action. Higher = more positive
+    revisions = better.
+    """
+    path = settings.processed_dir / "grades_long.parquet"
+    if not path.exists():
+        logger.warning("grades_long.parquet missing - sentiment factors will be NaN")
+        return pd.DataFrame(columns=["date", "symbol", "rating_rev_3m", "rating_rev_6m", "rating_breadth_12m"])
+    g = read_parquet(path)
+    g["date"] = pd.to_datetime(g["date"])
+    act = g["action"].astype(str).str.lower()
+    g["up"], g["down"] = (act == "upgrade").astype(int), (act == "downgrade").astype(int)
+    g = g.sort_values(["symbol", "date"])
+
+    reb = pd.DatetimeIndex(sorted(rebalance))
+    rn = reb.values.astype("datetime64[ns]")
+    r3 = (reb - pd.DateOffset(months=3)).values.astype("datetime64[ns]")
+    r6 = (reb - pd.DateOffset(months=6)).values.astype("datetime64[ns]")
+    r12 = (reb - pd.DateOffset(months=12)).values.astype("datetime64[ns]")
+
+    out = []
+    for sym, gg in g.groupby("symbol", sort=False):
+        d = gg["date"].values.astype("datetime64[ns]")
+        cu, cd = np.cumsum(gg["up"].values), np.cumsum(gg["down"].values)
+
+        def cum_at(times, arr):
+            idx = np.searchsorted(d, times, side="right")
+            return np.where(idx > 0, arr[np.clip(idx - 1, 0, len(arr) - 1)], 0)
+
+        cut, cdt = cum_at(rn, cu), cum_at(rn, cd)
+        u3, dn3 = cut - cum_at(r3, cu), cdt - cum_at(r3, cd)
+        u6, dn6 = cut - cum_at(r6, cu), cdt - cum_at(r6, cd)
+        u12, dn12 = cut - cum_at(r12, cu), cdt - cum_at(r12, cd)
+        tot12 = u12 + dn12
+        breadth = np.where(tot12 > 0, (u12 - dn12) / np.where(tot12 > 0, tot12, 1), np.nan)
+        cov = rn >= d[0]  # covered only from a name's first logged action
+        out.append(pd.DataFrame({
+            "date": reb, "symbol": sym,
+            "rating_rev_3m": np.where(cov, u3 - dn3, np.nan),
+            "rating_rev_6m": np.where(cov, u6 - dn6, np.nan),
+            "rating_breadth_12m": np.where(cov, breadth, np.nan),
+        }))
+    return pd.concat(out, ignore_index=True)
+
+
 def build_factor_panel() -> pd.DataFrame:
     """Construct the full factor panel: component ranks + family composites.
 
@@ -119,6 +170,8 @@ def build_factor_panel() -> pd.DataFrame:
 
     # Merge price-based factors (computed over full history so momentum has lookback).
     m = m.merge(_price_factors(rebalance), on=["date", "symbol"], how="left")
+    # Merge analyst recommendation-revision (sentiment) factors (PIT, ~2012+).
+    m = m.merge(_rating_factors(rebalance), on=["date", "symbol"], how="left")
 
     # Refresh the stale period-end price baked into FMP's value ratios to the live
     # rebalance-date price (see _refresh_value_prices). r = price(filing)/price(now):
