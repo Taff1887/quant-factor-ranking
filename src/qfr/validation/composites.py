@@ -45,40 +45,57 @@ from qfr.validation.factor_report import (
     pure_factor_return,
 )
 
-# Cross-family composite specs. Each entry: (name, list-of-raw-factor-cols).
-# These are the WINSORISED raw column names (no _rk suffix) - we z-score them.
-CROSS_FAMILY = [
-    ("Quality-Value (4)", ["returnOnEquity", "returnOnInvestedCapital",
-                           "freeCashFlowYield", "earningsYield"]),
-    ("Quality-Growth (4)", ["returnOnEquity", "returnOnInvestedCapital",
-                            "revenueGrowth", "epsgrowth"]),
-    ("Value-Growth (4)", ["freeCashFlowYield", "earningsYield",
-                          "revenueGrowth", "epsgrowth"]),
-    ("Top-3 by t-stat", ["returnOnInvestedCapital", "returnOnEquity", "freeCashFlowYield"]),
-    ("Top-5 by t-stat", ["returnOnInvestedCapital", "returnOnEquity", "freeCashFlowYield",
-                         "revenueGrowth", "epsgrowth"]),
-    ("Top-7 by t-stat", ["returnOnInvestedCapital", "returnOnEquity", "freeCashFlowYield",
-                         "revenueGrowth", "epsgrowth", "salesYield", "ebitdaGrowth"]),
-    ("Top-9 by t-stat", ["returnOnInvestedCapital", "returnOnEquity", "freeCashFlowYield",
-                         "revenueGrowth", "epsgrowth", "salesYield", "ebitdaGrowth",
-                         "rating_rev_6m", "netIncomeGrowth"]),
-    ("QVG broad (12)", ["returnOnEquity", "returnOnInvestedCapital", "returnOnAssets",
-                        "interestCoverageRatio", "freeCashFlowYield", "earningsYield",
-                        "salesYield", "ebitdaToEV", "revenueGrowth", "epsgrowth",
-                        "netIncomeGrowth", "ebitdaGrowth"]),
-    ("Multi-style (best of each, 6)", ["returnOnEquity", "freeCashFlowYield",
-                                       "revenueGrowth", "mom_12_1", "rating_rev_6m",
-                                       "interestCoverageRatio"]),
+# --------------------------------------------------------------------------
+# Within-group "curated" composites: combine ONLY the genuinely-good factors
+# inside each style family (drop the duds the full family composite carries).
+# These are TRUE composites in the textbook sense - one composite per group.
+# --------------------------------------------------------------------------
+CURATED_WITHIN_GROUP: list[tuple[str, list[str]]] = [
+    ("Value curated (3)", ["freeCashFlowYield", "earningsYield", "salesYield"]),
+    ("Quality curated (4)", ["returnOnEquity", "returnOnInvestedCapital",
+                             "returnOnAssets", "interestCoverageRatio"]),
+    ("Growth curated (4)", ["revenueGrowth", "epsgrowth", "netIncomeGrowth", "ebitdaGrowth"]),
 ]
 
-# Family composites already pre-built in the panel.
+# --------------------------------------------------------------------------
+# Two-stage multi-factor MODEL: stage 1 = within-group composites (equal-weight
+# z-scores), stage 2 = equal-weight combine the group composites + style
+# standalones (Momentum, Sentiment) so each STYLE gets equal weight regardless
+# of how many factors it has - the canonical institutional construction.
+# --------------------------------------------------------------------------
+TWO_STAGE_SPEC: list[tuple[str, list[str]]] = [
+    ("Value group",     ["freeCashFlowYield", "earningsYield", "salesYield"]),
+    ("Quality group",   ["returnOnEquity", "returnOnInvestedCapital",
+                         "returnOnAssets", "interestCoverageRatio"]),
+    ("Growth group",    ["revenueGrowth", "epsgrowth", "netIncomeGrowth", "ebitdaGrowth"]),
+    ("Momentum group",  ["mom_12_1"]),
+    ("Sentiment group", ["rating_rev_6m"]),
+]
+
+# --------------------------------------------------------------------------
+# Family composites already pre-built in the panel (rank-based mean, INCLUDES
+# the dud factors). Shown for comparison - typically dominated by the curated
+# within-group versions.
+# --------------------------------------------------------------------------
 FAMILY_COMPOSITES = [
-    ("Value family (5)", "value", 5),
-    ("Quality family (8)", "quality", 8),
-    ("Momentum family (3)", "momentum", 3),
-    ("Growth family (4)", "growth", 4),
-    ("Risk family (2)", "risk", 2),
-    ("Sentiment family (3)", "sentiment", 3),
+    ("Value family — full (5)", "value", 5),
+    ("Quality family — full (8)", "quality", 8),
+    ("Momentum family — full (3)", "momentum", 3),
+    ("Growth family — full (4)", "growth", 4),
+    ("Risk family — full (2)", "risk", 2),
+    ("Sentiment family — full (3)", "sentiment", 3),
+]
+
+# --------------------------------------------------------------------------
+# Cross-group "selection" composites (NOT strict composites, more like a
+# multi-factor model selected by t-stat). Included as a context comparison.
+# --------------------------------------------------------------------------
+CROSS_GROUP_SELECTION = [
+    ("Top-5 cross-group", ["returnOnInvestedCapital", "returnOnEquity", "freeCashFlowYield",
+                            "revenueGrowth", "epsgrowth"]),
+    ("Top-9 cross-group", ["returnOnInvestedCapital", "returnOnEquity", "freeCashFlowYield",
+                            "revenueGrowth", "epsgrowth", "salesYield", "ebitdaGrowth",
+                            "rating_rev_6m", "netIncomeGrowth"]),
 ]
 
 
@@ -100,6 +117,21 @@ def composite_zscore(panel: pd.DataFrame, factor_cols: list[str],
             raise KeyError(f"factor column missing from panel: {c}")
         pieces.append(w * cs_z(panel, c))
     return sum(pieces)
+
+
+def two_stage_composite(panel: pd.DataFrame, groups: list[tuple[str, list[str]]]) -> pd.Series:
+    """Two-stage construction:
+       1. For each group, equal-weight z-score of its component factors (within).
+       2. Equal-weight average of the group z-scores (across).
+    So each style gets equal weight regardless of how many factors it contains.
+    """
+    group_zs = []
+    for _, cols in groups:
+        if len(cols) == 1:
+            group_zs.append(cs_z(panel, cols[0]))
+        else:
+            group_zs.append(composite_zscore(panel, cols))
+    return sum(group_zs) / len(group_zs)
 
 
 def composite_stats(panel: pd.DataFrame, comp: pd.Series, name: str, n_factors: int) -> dict:
@@ -150,27 +182,39 @@ def render_table(df: pd.DataFrame, outpath) -> None:
 
     cell_text = [[fmt(r[k], k) for k in keys] for _, r in df.iterrows()]
 
-    fig, ax = plt.subplots(figsize=(15, max(3, 0.42 * len(cell_text) + 1.6)))
+    fig, ax = plt.subplots(figsize=(16, max(3, 0.42 * len(cell_text) + 1.6)))
     ax.axis("off")
     ax.set_title(
-        "Composite factors significance test  (z-score composites; bold/green = strict |t| >= 2)",
-        fontsize=12, fontweight="bold", loc="left", pad=14,
+        "Composite factor significance — within-group composites, two-stage multi-factor model, "
+        "family composites, cross-group selection  (bold/green = strict |t| >= 2)",
+        fontsize=11.5, fontweight="bold", loc="left", pad=14,
     )
     tbl = ax.table(
         cellText=cell_text, colLabels=cols, cellLoc="center", loc="center",
-        colWidths=[0.20, 0.04, 0.08, 0.06, 0.08, 0.06, 0.09, 0.07, 0.09, 0.07, 0.07],
+        colWidths=[0.22, 0.035, 0.075, 0.055, 0.075, 0.055, 0.075, 0.06, 0.075, 0.06, 0.06],
     )
     tbl.auto_set_font_size(False)
-    tbl.set_fontsize(9)
+    tbl.set_fontsize(8.5)
     tbl.scale(1, 1.55)
     for j in range(len(cols)):
         c = tbl[0, j]
         c.set_facecolor("#1f3a5f")
         c.set_text_props(color="white", fontweight="bold")
+
+    # Per-type row banding (background colour)
+    type_bg = {
+        "Within-group composite (curated)": "#e8f0fb",   # light blue
+        "Multi-factor model (two-stage)":   "#fff6d6",   # light gold
+        "Family composite (full, rank-based)": "#f0f0f0",  # light gray
+        "Cross-group selection":            "#ffffff",
+    }
     # Highlight any t-stat cell with |t| >= 2 (cols 3, 5, 7, 9, 10)
     t_col_idx = [3, 5, 7, 9, 10]
     t_keys = ["t_1m", "t_2m", "Q1_t", "pure_t", "max_|t|"]
     for i, (_, r) in enumerate(df.iterrows()):
+        row_bg = type_bg.get(r.get("type", ""), "#ffffff")
+        for j in range(len(cols)):
+            tbl[i + 1, j].set_facecolor(row_bg)
         for j, k in zip(t_col_idx, t_keys):
             v = r[k]
             if pd.notna(v) and abs(v) >= 2.0:
@@ -178,11 +222,16 @@ def render_table(df: pd.DataFrame, outpath) -> None:
                 c.set_facecolor("#cfe6cf")
                 c.set_text_props(fontweight="bold")
         tbl[i + 1, 0].set_text_props(ha="left", fontweight="bold" if r["max_|t|"] >= 2 else "normal")
-    note = ("Fundamental Law of Active Management (Grinold): IR ~ E[IC] x sqrt(N_independent). "
-            "Combining several borderline-significant factors should lift the composite t-stat above 2.  "
-            "Z-score composites: cross-sectional winsorise -> standardise -> equal-weight average.")
+
+    note = (
+        "Within-group composites (light blue) combine factors measuring the same concept "
+        "(value-only, quality-only, growth-only).  Two-stage model (gold) = equal-weight z-scores "
+        "within each group, then equal-weight across groups (style-balanced).  Family composites "
+        "(gray) are the existing rank-based mean of ALL components in a family including duds.  "
+        "Cross-group selection picks the best individual factors by t-stat regardless of group."
+    )
     fig.text(0.02, 0.02, note, fontsize=8.5, style="italic", color="#555")
-    fig.savefig(outpath, dpi=130, bbox_inches="tight")
+    fig.savefig(outpath, dpi=110, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -192,28 +241,61 @@ def main() -> None:
     logger.info(f"composite evaluation: {len(panel):,} rows, {panel['date'].nunique()} months")
 
     rows = []
-    # Family composites: use the pre-built columns directly
-    for name, col, n in FAMILY_COMPOSITES:
-        if col not in panel.columns:
-            continue
-        logger.info(f"  family composite: {name}")
-        rows.append(composite_stats(panel, panel[col], name, n))
 
-    # Cross-family z-score composites
-    for name, raw_cols in CROSS_FAMILY:
+    # 1. WITHIN-GROUP CURATED COMPOSITES (the strict-textbook "composites")
+    logger.info("-- within-group curated composites --")
+    for name, raw_cols in CURATED_WITHIN_GROUP:
         missing = [c for c in raw_cols if c not in panel.columns]
         if missing:
             logger.warning(f"  skipping {name}: missing {missing}")
             continue
-        logger.info(f"  z-score composite: {name}  ({len(raw_cols)} factors)")
+        logger.info(f"  {name}  ({len(raw_cols)} factors)")
         comp = composite_zscore(panel, raw_cols)
-        rows.append(composite_stats(panel, comp, name, len(raw_cols)))
+        rec = composite_stats(panel, comp, name, len(raw_cols))
+        rec["type"] = "Within-group composite (curated)"
+        rows.append(rec)
 
-    df = pd.DataFrame(rows).sort_values("max_|t|", ascending=False).reset_index(drop=True)
+    # 2. TWO-STAGE MULTI-FACTOR MODEL
+    logger.info("-- two-stage multi-factor model --")
+    multi = two_stage_composite(panel, TWO_STAGE_SPEC)
+    n_total = sum(len(c) for _, c in TWO_STAGE_SPEC)
+    rec = composite_stats(panel, multi,
+                          f"Two-stage multi-factor model ({len(TWO_STAGE_SPEC)} groups, {n_total} factors)",
+                          n_total)
+    rec["type"] = "Multi-factor model (two-stage)"
+    rows.append(rec)
+
+    # 3. FAMILY COMPOSITES (full, rank-based, with duds) - comparison
+    logger.info("-- family composites (full, for comparison) --")
+    for name, col, n in FAMILY_COMPOSITES:
+        if col not in panel.columns:
+            continue
+        rec = composite_stats(panel, panel[col], name, n)
+        rec["type"] = "Family composite (full, rank-based)"
+        rows.append(rec)
+
+    # 4. CROSS-GROUP SELECTION (multi-factor selection by t-stat) - comparison
+    logger.info("-- cross-group t-stat selection (comparison) --")
+    for name, raw_cols in CROSS_GROUP_SELECTION:
+        missing = [c for c in raw_cols if c not in panel.columns]
+        if missing:
+            continue
+        comp = composite_zscore(panel, raw_cols)
+        rec = composite_stats(panel, comp, name, len(raw_cols))
+        rec["type"] = "Cross-group selection"
+        rows.append(rec)
+
+    df = pd.DataFrame(rows)
+    # keep the order intentional (group blocks); but sort within each block by max_|t|
+    type_order = ["Within-group composite (curated)", "Multi-factor model (two-stage)",
+                  "Family composite (full, rank-based)", "Cross-group selection"]
+    df["__t"] = df["type"].map({t: i for i, t in enumerate(type_order)})
+    df = df.sort_values(["__t", "max_|t|"], ascending=[True, False]).drop(columns="__t").reset_index(drop=True)
+
     (PROJECT_ROOT / "reports").mkdir(parents=True, exist_ok=True)
     df.round(3).to_csv(PROJECT_ROOT / "reports" / "composites_summary.csv", index=False)
     render_table(df, settings.charts_dir / "composites_significance.png")
-    logger.info("composites significance (sorted by max |t|):\n" + df.round(2).to_string(index=False))
+    logger.info("composites significance:\n" + df.round(2).to_string(index=False))
 
 
 if __name__ == "__main__":
