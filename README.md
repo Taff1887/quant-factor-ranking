@@ -39,6 +39,8 @@ The 5-factor composite (ROIC + ROE + FCF yield + revenue growth + EPS growth, eq
 
 **Practical takeaway.** The long-only cap-weighted books are the practical result in this version of the project. The dollar-neutral long-short portfolios generate positive CAPM α, but their standalone realised return profile (modest CAGR, low Sharpe, meaningful drawdowns) means they should be read as **evidence the composite contains cross-sectional information**, not as fully optimised market-neutral strategies. They need further risk and turnover work to be considered investable.
 
+**Signal quality.** Independent of any portfolio construction choice, the composite's **rank IC** (Spearman correlation with forward returns) is significant at every horizon tested: **1.37 % @ 1m (t = 2.44)**, **2.58 % @ 3m (t = 4.41)**, **1.90 % @ 12m (t = 3.81)**. See [§6.2](#62-composite-rank-ic--signal-quality-diagnostic) for the IC decay profile and time-series.
+
 The five-factor recipe and weighting are constant across all variants:
 > `composite(i, t) = (1/5) × Σ_k z_k(i, t)` — equal-weight cross-sectional z-scores of ROIC, ROE, FCF yield, revenue growth, EPS growth, winsorised and standardised within each month.
 
@@ -206,16 +208,50 @@ for each month t, for each stock i:
     composite(i,t)  = (1/5) × Σ_k z_k(i,t)                  # equal weight, 20 % each
 ```
 
-The composite itself clears strict 95 % on rank IC: **mean IC = 1.37 %, t-stat (1m IC) = 2.44, t-stat (2m IC) = 3.17**.
+### 6.2 Composite rank IC — signal-quality diagnostic
 
-### 6.2 Two layers of weighting (distinct)
+The **Information Coefficient** is the cross-sectional Spearman rank correlation between the composite score at month *t* and the realised forward return — a single, robust number measuring how much information the signal contains. We report (i) the **horizon IC** across cumulative forward returns of 1, 2, 3, 6, 12 months, and (ii) the **lagged IC** (the IC at each single-month lag 1..12) to read how fast the signal decays.
+
+![Composite rank IC by horizon](charts/composite_ic_horizons.png)
+
+| Horizon | Mean rank IC | IC IR | t-stat | Hit rate | n months |
+|---|---|---|---|---|---|
+| 1 month | 1.37 % | 0.18 | **2.44** | 55.9 % | 195 |
+| 2 months | 2.12 % | 0.27 | **3.72** | 63.9 % | 194 |
+| **3 months** | **2.58 %** | **0.32** | **4.41** | **65.3 %** | 193 |
+| 6 months | 2.27 % | 0.27 | **3.73** | 66.8 % | 190 |
+| 12 months | 1.90 % | 0.28 | **3.81** | 61.4 % | 184 |
+
+> Every horizon clears |t| ≥ 2.4. The composite is meaningfully stronger than any of its 5 individual components (which sit in the 0.3 %–1.4 % range with |t| ≤ 2.0) — exactly the diversification benefit you'd hope an equal-weight z-score blend would produce.
+
+![Composite IC decay](charts/composite_ic_decay.png)
+
+| Lag | Avg IC (single-month return at lag) | t-stat |
+|---|---|---|
+| 1 | 1.37 % | 2.44 |
+| 2 | 1.75 % | 3.17 |
+| **3** | **1.78 %** | **3.26** |
+| 4 | 1.27 % | 2.25 |
+| 5 | 0.47 % | 0.80 |
+| 6 | −0.06 % | −0.10 |
+| 7–12 | mostly noise, |t| < 1.5 | |
+
+> The signal peaks at lag 3 and is statistically significant out to lag 4, then decays into noise. This is the classic pattern for fundamental signals — the market takes ~2–3 months to fully price in newly released fundamental information, after which there is no incremental edge. It also explains why **3-month** is the strongest cumulative horizon and supports a monthly-rebalance design (we don't need to trade faster than the information moves).
+
+![Composite rank IC monthly time series](charts/composite_rank_ic.png)
+
+The monthly time series shows the IC is positive on a ~56 % hit rate but with meaningful variation — the 12-month rolling average swings between −1 % and +3 %, with notable underperformance in 2010–2011 (post-GFC value crash), early 2017, and the 2020 COVID factor reversal, balanced by strong runs in 2013–2016 and 2022–2024. This is consistent with the Fundamental Law: an IC of 1.4 %/month with ~470 names and a ~36 % effective N_independent (due to factor correlation) implies a theoretical max IR ≈ 1.4 % × √12 × √(36 % × 470) ≈ 0.6 — and we realise ~1.06 Sharpe on the long-only cap-weighted top quintile, broadly in line once we add the SPY beta exposure on top.
+
+Artefacts: [`reports/composite_rank_ic_horizons.csv`](reports/composite_rank_ic_horizons.csv), [`reports/composite_ic_decay.csv`](reports/composite_ic_decay.csv), [`reports/composite_rank_ic_monthly.csv`](reports/composite_rank_ic_monthly.csv).
+
+### 6.3 Two layers of weighting (distinct)
 
 | Layer | Controls | Choice |
 |---|---|---|
 | Factor → composite | how much each of the 5 factors counts toward each stock's score | equal-weight z-scores (20 % each) |
 | Stocks → portfolio | how much each stock in the chosen bucket counts toward portfolio P&L | EW (1/N per name) or CW (∝ market cap) — both tested |
 
-### 6.3 Portfolio variants
+### 6.4 Portfolio variants
 
 | Variant | Long | Short | Stock weighting | Net exposure |
 |---|---|---|---|---|
@@ -228,7 +264,7 @@ The composite itself clears strict 95 % on rank IC: **mean IC = 1.37 %, t-stat (
 
 Monthly rebalanced, **10 bps per side** on traded notional (so a name fully turning over costs 20 bps round-trip on long-only and 40 bps on long-short).
 
-### 6.4 CAPM α (Jensen's alpha)
+### 6.5 CAPM α (Jensen's alpha)
 
 For each variant, we fit `r_strategy(t) = α + β × r_SPY(t) + ε(t)` by OLS over the monthly series and annualise α (×12). β isolates the market-beta drag; α is the part of return not explained by market exposure. r_f is treated as 0; with r_f ~ 1.5 % the LS α figures would tighten by ~1.5 %, all still positive.
 

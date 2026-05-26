@@ -38,6 +38,9 @@ ANN = 12
 DEFAULT_COST_PER_SIDE = 0.001  # 10 bps per side
 COST_LEVELS_BPS = [0, 5, 10, 25, 50]
 BETA_WINDOW = 36  # months for trailing beta estimation
+IC_HORIZONS = (1, 2, 3, 6, 12)
+IC_DECAY_MAX_LAG = 12
+IC_MIN_NAMES = 20
 
 TOP_FACTORS = [
     "returnOnInvestedCapital",   # quality
@@ -64,6 +67,104 @@ def composite_score(panel: pd.DataFrame, cols: list[str]) -> pd.Series:
     counts = mask.sum(axis=1)
     sums = np.where(mask, arr, 0).sum(axis=1)
     return pd.Series(np.where(counts > 0, sums / counts, np.nan), index=panel.index)
+
+
+# --------------------------------------------------------------------------
+# Composite rank IC (Spearman) - the signal-quality diagnostic
+#
+# Per individual factor we already report rank ICs in factor_screen.csv;
+# here we report the IC of the composite that we actually trade.
+# --------------------------------------------------------------------------
+def _spearman_ic_monthly(panel: pd.DataFrame, signal_col: str, ret_col: str,
+                         min_names: int = IC_MIN_NAMES) -> pd.Series:
+    """Per-month cross-sectional Spearman corr between signal_t and ret_col_t."""
+    out: dict = {}
+    sub_all = panel[["date", signal_col, ret_col]].dropna()
+    for d, sub in sub_all.groupby("date"):
+        if len(sub) >= min_names:
+            ic = sub[signal_col].corr(sub[ret_col], method="spearman")
+            if pd.notna(ic):
+                out[d] = ic
+    return pd.Series(out, name=f"IC_{ret_col}").sort_index()
+
+
+def _ic_summary(s: pd.Series) -> dict:
+    s = s.dropna()
+    n = len(s)
+    if n == 0:
+        return {"mean_ic": np.nan, "std_ic": np.nan, "ic_ir": np.nan,
+                "t_stat": np.nan, "hit_rate": np.nan, "n_months": 0}
+    sd = float(s.std())
+    return {
+        "mean_ic": float(s.mean()),
+        "std_ic": sd,
+        "ic_ir": float(s.mean() / sd) if sd > 0 else np.nan,
+        "t_stat": float(s.mean() / sd * np.sqrt(n)) if sd > 0 else np.nan,
+        "hit_rate": float((s > 0).mean()),
+        "n_months": n,
+    }
+
+
+def composite_ic_horizons(panel: pd.DataFrame, signal_col: str = "composite",
+                          horizons: tuple[int, ...] = IC_HORIZONS,
+                          ) -> tuple[pd.DataFrame, dict[int, pd.Series]]:
+    """Composite rank IC at multiple horizons (cumulative h-month forward return).
+
+    For h not already in the panel as ret_fwd_{h}m, we compound monthly returns
+    using shifted ret_fwd_1m. Returns a (summary_df, ic_series_by_horizon) pair.
+    """
+    p = panel.sort_values(["symbol", "date"]).copy()
+    g1 = p.groupby("symbol")["ret_fwd_1m"]
+    series_by_h: dict[int, pd.Series] = {}
+    rows = []
+    for h in horizons:
+        col = f"_cum_ret_fwd_{h}m"
+        if h == 1:
+            p[col] = p["ret_fwd_1m"]
+        elif f"ret_fwd_{h}m" in p.columns:
+            p[col] = p[f"ret_fwd_{h}m"]
+        else:
+            cum = (1.0 + p["ret_fwd_1m"])
+            for k in range(1, h):
+                cum = cum * (1.0 + g1.shift(-k))
+            p[col] = cum - 1.0
+        ic_s = _spearman_ic_monthly(p, signal_col, col)
+        series_by_h[h] = ic_s
+        st = _ic_summary(ic_s)
+        rows.append({
+            "horizon_months": h,
+            "mean_ic_%": st["mean_ic"] * 100,
+            "ic_ir": st["ic_ir"],
+            "t_stat": st["t_stat"],
+            "hit_rate_%": st["hit_rate"] * 100,
+            "n_months": st["n_months"],
+        })
+    return pd.DataFrame(rows), series_by_h
+
+
+def composite_ic_decay(panel: pd.DataFrame, signal_col: str = "composite",
+                       max_lag: int = IC_DECAY_MAX_LAG) -> pd.DataFrame:
+    """Average IC at lags 1..max_lag (corr of signal_t with return *in* month t+lag-1).
+
+    Lag 1 = ret in [t, t+1] (the contemporaneous forward month, same as 1m IC).
+    Lag k = ret in [t+k-1, t+k] (the single-month return that far ahead).
+    Use this to read 'how fast does the signal decay'.
+    """
+    p = panel.sort_values(["symbol", "date"]).copy()
+    g = p.groupby("symbol")["ret_fwd_1m"]
+    rows = []
+    for lag in range(1, max_lag + 1):
+        p["_r"] = g.shift(-(lag - 1))
+        ic_s = _spearman_ic_monthly(p, signal_col, "_r")
+        st = _ic_summary(ic_s)
+        rows.append({
+            "lag": lag,
+            "avg_ic_%": st["mean_ic"] * 100,
+            "t_stat": st["t_stat"],
+            "hit_rate_%": st["hit_rate"] * 100,
+            "n_months": st["n_months"],
+        })
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------
@@ -547,6 +648,82 @@ def chart_ls_neutral_variants(ls_dollar: dict, ls_beta: dict, ls_sector: dict,
     _save(fig, "backtest_ls_neutral_variants")
 
 
+def chart_composite_ic_monthly(ic1m: pd.Series) -> None:
+    """Monthly composite rank IC bars + 12m rolling mean + summary stats box."""
+    import matplotlib.pyplot as plt
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    st = _ic_summary(ic1m)
+    roll = ic1m.rolling(12, min_periods=6).mean()
+    fig, ax = plt.subplots(figsize=(13, 5.5))
+    ax.bar(ic1m.index, ic1m.values * 100, width=22, color="#bcbcbc", alpha=0.9,
+           label="Monthly rank IC")
+    ax.plot(roll.index, roll.values * 100, lw=1.8, color="#1f3a5f",
+            label="12m rolling avg")
+    ax.axhline(0, color="#444", lw=0.7)
+    ax.set_title("Composite rank IC — Spearman corr of 5-factor composite with 1m forward returns",
+                 fontsize=12, fontweight="bold", loc="left")
+    ax.set_ylabel("Rank IC (%)")
+    ax.text(0.985, 0.97,
+            f"mean IC   = {st['mean_ic'] * 100:.2f} %\n"
+            f"IC IR     = {st['ic_ir']:.2f}\n"
+            f"t-stat    = {st['t_stat']:.2f}\n"
+            f"hit rate  = {st['hit_rate'] * 100:.1f} %\n"
+            f"n months  = {st['n_months']}",
+            transform=ax.transAxes, ha="right", va="top",
+            family="monospace", fontsize=9.5,
+            bbox=dict(boxstyle="round", fc="white", ec="#888", alpha=0.93))
+    ax.legend(fontsize=9, loc="upper left")
+    fig.tight_layout()
+    _save(fig, "composite_rank_ic")
+
+
+def chart_composite_ic_decay(decay_df: pd.DataFrame) -> None:
+    """Composite IC at lags 1..12 — how fast does the signal decay?"""
+    import matplotlib.pyplot as plt
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    fig, ax = plt.subplots(figsize=(11, 5))
+    colors = ["#1f3a5f" if v >= 0 else "#bc4a3c" for v in decay_df["avg_ic_%"]]
+    ax.bar(decay_df["lag"], decay_df["avg_ic_%"], color=colors, alpha=0.85)
+    for x, y, t in zip(decay_df["lag"], decay_df["avg_ic_%"], decay_df["t_stat"]):
+        offset = 0.04 if y >= 0 else -0.08
+        ax.text(x, y + offset, f"{y:.2f}\nt={t:.2f}",
+                ha="center", fontsize=8, color="#333")
+    ax.axhline(0, color="#444", lw=0.7)
+    ax.set_xticks(list(decay_df["lag"]))
+    ax.set_xlabel("Lag (months ahead) — single-month return at that lag")
+    ax.set_ylabel("Avg rank IC (%)")
+    ax.set_title("Composite IC decay — avg single-month rank IC by lag",
+                 fontsize=12, fontweight="bold", loc="left")
+    fig.tight_layout()
+    _save(fig, "composite_ic_decay")
+
+
+def chart_composite_ic_horizons(horizon_df: pd.DataFrame) -> None:
+    """Composite IC vs cumulative forward-return horizons (1/2/3/6/12 months)."""
+    import matplotlib.pyplot as plt
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    fig, ax = plt.subplots(figsize=(11, 5))
+    xs = np.arange(len(horizon_df))
+    ax.bar(xs, horizon_df["mean_ic_%"], color="#1f3a5f", alpha=0.85)
+    for i, (mic, t, hit) in enumerate(zip(horizon_df["mean_ic_%"],
+                                          horizon_df["t_stat"],
+                                          horizon_df["hit_rate_%"])):
+        ax.text(i, mic + 0.05, f"{mic:.2f}%\nt={t:.2f}\nhit={hit:.0f}%",
+                ha="center", fontsize=8.5)
+    ax.axhline(0, color="#444", lw=0.7)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{h}m" for h in horizon_df["horizon_months"]])
+    ax.set_xlabel("Forward-return horizon (cumulative)")
+    ax.set_ylabel("Mean rank IC (%)")
+    ax.set_title("Composite rank IC by forward-return horizon",
+                 fontsize=12, fontweight="bold", loc="left")
+    fig.tight_layout()
+    _save(fig, "composite_ic_horizons")
+
+
 def render_metrics_table(df: pd.DataFrame, title: str, out_name: str) -> None:
     import matplotlib.pyplot as plt
     keys = ["CAGR_%", "ann_vol_%", "Sharpe", "max_drawdown_%",
@@ -604,6 +781,11 @@ def main() -> None:
     panel["composite"] = composite_score(panel, TOP_FACTORS)
     logger.info(f"Composite of top 5 factors: {TOP_FACTORS}")
 
+    # Composite rank IC (Spearman) - signal-quality diagnostic for the blended signal
+    horizon_df, _ic_series_by_h = composite_ic_horizons(panel, "composite")
+    decay_df = composite_ic_decay(panel, "composite")
+    ic_1m_series = _spearman_ic_monthly(panel, "composite", "ret_fwd_1m")
+
     # Long-only
     lo_dec_ew = portfolio_monthly(panel, "composite", n_buckets=10, weight="equal", name="Top decile EW")
     lo_dec_cw = portfolio_monthly(panel, "composite", n_buckets=10, weight="cap",   name="Top decile CW")
@@ -643,6 +825,11 @@ def main() -> None:
     gn_table.to_csv(PROJECT_ROOT / "reports" / "backtest_gross_vs_net.csv", index=False)
     to_table.to_csv(PROJECT_ROOT / "reports" / "backtest_turnover.csv", index=False)
 
+    horizon_df.to_csv(PROJECT_ROOT / "reports" / "composite_rank_ic_horizons.csv", index=False)
+    decay_df.to_csv(PROJECT_ROOT / "reports" / "composite_ic_decay.csv", index=False)
+    ic_1m_series.rename("composite_rank_ic").to_frame().to_csv(
+        PROJECT_ROOT / "reports" / "composite_rank_ic_monthly.csv")
+
     # Charts
     chart_cumulative_long_only(long_only_strats, spy, u_ew, DEFAULT_COST_PER_SIDE)
     chart_longshort(ls_strats, DEFAULT_COST_PER_SIDE)
@@ -651,6 +838,9 @@ def main() -> None:
     chart_gross_vs_net(gn_table)
     chart_turnover(to_table)
     chart_ls_neutral_variants(ls_q_ew, ls_q_ew_beta, ls_q_ew_sector, DEFAULT_COST_PER_SIDE)
+    chart_composite_ic_monthly(ic_1m_series)
+    chart_composite_ic_decay(decay_df)
+    chart_composite_ic_horizons(horizon_df)
 
     render_metrics_table(summary_long_only, "Long-only portfolios — 5-factor composite vs SPY (net of 10 bps/side)", "backtest_metrics")
     render_metrics_table(summary_ls, "Long-short diagnostics — dollar-neutral spreads on the 5-factor composite", "backtest_metrics_longshort")
@@ -662,6 +852,8 @@ def main() -> None:
     logger.info(f"\n=== Cost sensitivity ===\n{cs_table.round(3).to_string(index=False)}")
     logger.info(f"\n=== Gross vs net ===\n{gn_table.round(3).to_string(index=False)}")
     logger.info(f"\n=== Turnover ===\n{to_table.round(3).to_string(index=False)}")
+    logger.info(f"\n=== Composite rank IC by horizon ===\n{horizon_df.round(3).to_string(index=False)}")
+    logger.info(f"\n=== Composite IC decay ===\n{decay_df.round(3).to_string(index=False)}")
 
 
 if __name__ == "__main__":
