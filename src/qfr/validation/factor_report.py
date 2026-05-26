@@ -1,30 +1,40 @@
-"""Part 4c - Per-factor tearsheets: the full factor-testing battery.
+"""Per-factor analysis: each factor gets its own folder under its family.
 
-For every individual factor we run the standard quant factor-validation battery:
+For every individual factor (charts/factors/<family>/<factor>/):
 
-  1. Rank IC          monthly cross-sectional Spearman IC vs next-month return;
-                      mean IC, 12-month rolling IC, IC t-stat.
-  2. IC decay         average IC at lags 1..12 months + per-lag success rate &
-                      t-stat (how fast the market prices the signal away).
-  3. Fractiles        10 equal-weight deciles (D1 = best), monthly rebalanced:
-                      cumulative growth-of-$1 vs the universe + a stats table
-                      (D1..D10 + D1-D10 spread + Market: total/active return,
-                      tracking error, information ratio, t-stat(IR), monthly
-                      success, turnover, volatility, Sharpe, CAPM alpha/beta).
-  4. Pure factor ret  monthly cross-sectional (Fama-MacBeth) regression of the
-                      forward return on the normalised factor PLUS risk controls
-                      (size, sector, book-to-price); the factor coefficient is the
-                      "pure" return to a 1-SD exposure. Reported pure vs raw,
-                      cumulative, with annualised return / TE / IR / success / t.
+    chart1_rank_ic.png            Monthly rank IC (bars) + 12m average (line) +
+                                   t-stat(IC) annotation.
+    chart3_ic_decay.png           Average IC at lags 1-12 months (bars) + success
+                                   rate per lag (line, right axis).
+    chart5_deciles.png            10 equal-weight deciles, cumulative growth of
+                                   $1 vs the equal-weight universe (D1 = best).
+    chart5_quintiles.png          5 equal-weight quintiles (Q1 = best), same.
+    table1_quintile_stats.png     Quintile stats table (Quintile 1..5 + Q1-Q5
+                                   spread + Market): Total return, Active return,
+                                   Tracking error, Information ratio, t-stat(IR),
+                                   Monthly success rate, Turnover, Volatility,
+                                   Sharpe, CAPM beta/alpha.
+    chart7_pure_factor_index.png  Cumulative index (base 100) of the 1-SD pure
+                                   factor return (with size + sector + book-to-
+                                   price stripped), annotated with annualised
+                                   pure return, tracking error, information
+                                   ratio, monthly success and t-stat(IR).
+    chart8_raw_factor_index.png   Same, raw factor return (univariate).
+    chart9_pure_factor_returns.png   Monthly pure factor returns (bars) + 12m
+                                      rolling average (line).
+    chart10_raw_factor_returns.png   Monthly raw factor returns (bars) + 12m
+                                      rolling average (line).
 
-Each factor gets a 4-panel tearsheet PNG (charts/factors/<factor>.png) and a row
-in reports/factor_report_summary.csv (+ per-decile stats in
-reports/factor_report_fractiles.csv).
+A combined summary CSV (one row per factor) is written to
+reports/factor_report_summary.csv, separate from the per-factor folders.
 
 Run::  uv run python -m qfr.validation.factor_report
 """
 
 from __future__ import annotations
+
+import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -35,8 +45,8 @@ from qfr.utils.logging import logger
 
 ANN = 12
 MIN_NAMES = 20
-N_FRACTILES = 10        # deciles (D1 = top, D{n} = bottom)
 MAX_LAG = 12
+UNIVERSE = "S&P 500"
 
 LABELS = {
     "earningsYield": "Earnings yield", "freeCashFlowYield": "FCF yield",
@@ -54,24 +64,33 @@ LABELS = {
 }
 
 
-def factor_list() -> list[tuple[str, str, str]]:
-    """(group, label, rank-column) for every individual factor (deduped)."""
+def _slug(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+
+
+def factor_list() -> list[tuple[str, str, str, str]]:
+    """[(family, label, slug, rank_col)] for every individual factor (deduped)."""
     items, seen = [], set()
     for fam, comps in FAMILIES.items():
         for c in comps:
             col = c + "_rk"
-            if col not in seen:
-                seen.add(col)
-                items.append((fam, LABELS.get(c, c), col))
+            if col in seen:
+                continue
+            seen.add(col)
+            label = LABELS.get(c, c)
+            items.append((fam, label, _slug(label), col))
     for fam, c in [("size", "size_raw"), ("reversal", "st_rev")]:
         col = c + "_rk"
-        if col not in seen:
-            items.append((fam, LABELS.get(c, c), col))
+        if col in seen:
+            continue
+        seen.add(col)
+        label = LABELS.get(c, c)
+        items.append((fam, label, _slug(label), col))
     return items
 
 
 # --------------------------------------------------------------------------
-# 1. Rank IC
+# 1. Rank IC (monthly + rolling)
 # --------------------------------------------------------------------------
 def ic_monthly(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m") -> pd.Series:
     out = {}
@@ -84,7 +103,7 @@ def ic_monthly(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m") -> pd.Ser
     return pd.Series(out).sort_index()
 
 
-def _ts(s: pd.Series) -> dict:
+def _ic_ts_stats(s: pd.Series) -> dict:
     sd = s.std()
     return {"mean_ic": s.mean(), "ic_ir": (s.mean() / sd) if sd else np.nan,
             "t_stat": (s.mean() / sd * np.sqrt(len(s))) if sd else np.nan,
@@ -98,7 +117,7 @@ def ic_decay(panel: pd.DataFrame, col: str, max_lag: int = MAX_LAG) -> pd.DataFr
     p = panel.sort_values(["symbol", "date"])
     rows = []
     for n in range(1, max_lag + 1):
-        rn = p.groupby("symbol")["ret_fwd_1m"].shift(-(n - 1))  # single-month return n months ahead
+        rn = p.groupby("symbol")["ret_fwd_1m"].shift(-(n - 1))
         tmp = pd.DataFrame({"date": p["date"].values, "f": p[col].values, "r": rn.values})
         ics = {}
         for d, g in tmp.groupby("date"):
@@ -115,7 +134,7 @@ def ic_decay(panel: pd.DataFrame, col: str, max_lag: int = MAX_LAG) -> pd.DataFr
 
 
 # --------------------------------------------------------------------------
-# 3. Fractiles (deciles, D1 = best)
+# 3. Fractiles
 # --------------------------------------------------------------------------
 def _turnover(members: pd.DataFrame) -> float:
     if members.empty:
@@ -135,24 +154,28 @@ def _capm(r: pd.Series, mkt: pd.Series) -> tuple[float, float]:
     return beta, alpha
 
 
-def fractiles(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m", n: int = N_FRACTILES):
+def fractiles(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m", n: int = 10):
+    """Cumulative monthly returns + stats per fractile. n=10 -> D1..D10, n=5 -> Q1..Q5."""
     d = panel.dropna(subset=[col, ret]).copy()
     q = d.groupby("date")[col].transform(lambda s: pd.qcut(s.rank(method="first"), n, labels=False))
-    d["D"] = (n - q).astype(int)  # D1 = top decile (best factor score)
-    qret = d.groupby(["date", "D"])[ret].mean().unstack("D").sort_index()
-    qret.columns = [f"D{c}" for c in qret.columns]
+    d["B"] = (n - q).astype(int)  # B1 = top bucket (best factor score)
+    prefix = "Q" if n == 5 else "D"
+    qret = d.groupby(["date", "B"])[ret].mean().unstack("B").sort_index()
+    qret.columns = [f"{prefix}{c}" for c in qret.columns]
     mkt = d.groupby("date")[ret].mean().sort_index()
+    mkt_ann = (1 + mkt).prod() ** (ANN / len(mkt)) - 1
     years = len(mkt) / ANN
-    spread_name = f"D1-D{n}"
+    spread_name = f"{prefix}1-{prefix}{n}"
 
-    def stat_block(r: pd.Series, active_vs_mkt: bool) -> dict:
+    def stat_block(r: pd.Series, vs_mkt: bool) -> dict:
+        r = r.dropna()
         ann_tot = (1 + r).prod() ** (ANN / len(r)) - 1
-        act = (r - mkt).dropna() if active_vs_mkt else r
+        act = (r - mkt).dropna() if vs_mkt else r
         te = act.std() * np.sqrt(ANN)
         ir = (act.mean() / act.std() * np.sqrt(ANN)) if act.std() > 0 else np.nan
-        beta, alpha = _capm(r, mkt) if active_vs_mkt else (np.nan, np.nan)
+        beta, alpha = _capm(r, mkt) if vs_mkt else (np.nan, np.nan)
         return {"total_return": ann_tot,
-                "active_return": (ann_tot - ((1 + mkt).prod() ** (ANN / len(mkt)) - 1)) if active_vs_mkt else ann_tot,
+                "active_return": (ann_tot - mkt_ann) if vs_mkt else ann_tot,
                 "tracking_error": te, "info_ratio": ir,
                 "t_stat": (ir * np.sqrt(years)) if pd.notna(ir) else np.nan,
                 "monthly_success": float((act > 0).mean()),
@@ -161,20 +184,22 @@ def fractiles(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m", n: int = N
                 "capm_beta": beta, "capm_alpha": alpha}
 
     rows = {}
-    for dc in qret.columns:
-        rows[dc] = stat_block(qret[dc].dropna(), active_vs_mkt=True)
-        rows[dc]["turnover"] = _turnover(d[d["D"] == int(dc[1:])][["date", "symbol"]])
-    spread = (qret["D1"] - qret[f"D{n}"]).dropna()
-    rows[spread_name] = stat_block(spread, active_vs_mkt=False)
-    rows[spread_name].update({"active_return": stat_block(spread, False)["total_return"], "turnover": np.nan})
-    rows["Market"] = stat_block(mkt, active_vs_mkt=False)
-    rows["Market"].update({"active_return": 0.0, "turnover": np.nan})
+    for fc in qret.columns:
+        rows[fc] = stat_block(qret[fc], vs_mkt=True)
+        rows[fc]["turnover"] = _turnover(d[d["B"] == int(fc[1:])][["date", "symbol"]])
+    spread = (qret[f"{prefix}1"] - qret[f"{prefix}{n}"]).dropna()
+    rows[spread_name] = stat_block(spread, vs_mkt=False)
+    rows[spread_name]["active_return"] = rows[spread_name]["total_return"]
+    rows[spread_name]["turnover"] = np.nan
+    rows["Market"] = stat_block(mkt, vs_mkt=False)
+    rows["Market"]["active_return"] = 0.0
+    rows["Market"]["turnover"] = np.nan
     tbl = pd.DataFrame(rows).T
     return qret, mkt, tbl
 
 
 # --------------------------------------------------------------------------
-# 4. Pure factor returns (monthly Fama-MacBeth cross-sectional regression)
+# 4. Pure factor returns (Fama-MacBeth, controlling for size + sector + B/P)
 # --------------------------------------------------------------------------
 def _z(x: np.ndarray) -> np.ndarray:
     s = np.nanstd(x)
@@ -182,8 +207,6 @@ def _z(x: np.ndarray) -> np.ndarray:
 
 
 def pure_factor_return(panel: pd.DataFrame, col: str) -> pd.DataFrame:
-    """Monthly factor coefficient controlling for size + sector + book-to-price (pure),
-    and the univariate coefficient (raw). Units: return to a 1-SD exposure."""
     drop_size = col == "size_raw_rk"
     drop_btp = col == "bookToMarket_rk"
     need = [col, "ret_fwd_1m", "marketCap", "sector"] + ([] if drop_btp else ["bookToMarket"])
@@ -212,6 +235,7 @@ def pure_factor_return(panel: pd.DataFrame, col: str) -> pd.DataFrame:
 
 
 def _series_stats(s: pd.Series) -> dict:
+    s = s.dropna()
     sd = s.std()
     return {"ann_return": s.mean() * ANN, "tracking_error": sd * np.sqrt(ANN),
             "info_ratio": (s.mean() / sd * np.sqrt(ANN)) if sd else np.nan,
@@ -220,102 +244,238 @@ def _series_stats(s: pd.Series) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Tearsheet (4 panels) + run loop
+# Chart renderers
 # --------------------------------------------------------------------------
-def tearsheet(panel: pd.DataFrame, group: str, label: str, col: str):
+def _save(fig, path: Path) -> None:
     import matplotlib.pyplot as plt
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
 
-    from qfr.utils.viz import PALETTE, save_fig, set_plot_style
 
+def _setup_style() -> None:
+    from qfr.utils.viz import set_plot_style
     set_plot_style()
-    ic = ic_monthly(panel, col)
-    icst = _ts(ic)
-    dec = ic_decay(panel, col)
-    qret, mkt, ftbl = fractiles(panel, col)
-    pfr = pure_factor_return(panel, col)
-    pst, rst = _series_stats(pfr["pure"]), _series_stats(pfr["raw"])
 
-    fig, ((a1, a2), (a3, a4)) = plt.subplots(2, 2, figsize=(15, 10))
 
+# Chart 1
+def chart1_rank_ic(ic: pd.Series, label: str, outdir: Path) -> None:
+    import matplotlib.pyplot as plt
+    stats = _ic_ts_stats(ic)
     roll = ic.rolling(12, min_periods=6).mean()
-    a1.plot(ic.index, ic.values * 100, color=PALETTE["muted"], lw=0.6, alpha=0.5, label="monthly IC")
-    a1.plot(roll.index, roll.values * 100, color=PALETTE["primary"], lw=1.9, label="12m rolling IC")
-    a1.axhline(icst["mean_ic"] * 100, color=PALETTE["green"], lw=1.0, ls="--",
-               label=f"mean {icst['mean_ic'] * 100:.2f}%")
-    a1.axhline(0, color="#444", lw=0.7)
-    a1.set_title(f"1. Rank IC — mean {icst['mean_ic'] * 100:.2f}%, t={icst['t_stat']:.2f}, hit {icst['success'] * 100:.0f}%")
-    a1.set_ylabel("rank IC (%)")
-    a1.legend(fontsize=7, loc="upper left")
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    ax.bar(ic.index, ic.values * 100, width=22, color="#bcbcbc", alpha=0.9, label="Rank IC (monthly)")
+    ax.plot(roll.index, roll.values * 100, color="#1f3a5f", lw=2.0, label="12m average")
+    ax.axhline(0, color="#444", lw=0.7)
+    ax.set_ylabel("Rank IC (%)")
+    ax.set_title(f"Chart 1: {label} for {UNIVERSE} (Rank ICs)",
+                 fontsize=11.5, fontweight="bold", loc="left")
+    ax.text(0.985, 0.96,
+            f"mean IC = {stats['mean_ic'] * 100:.2f}%\nt-stat(IC) = {stats['t_stat']:.2f}",
+            transform=ax.transAxes, ha="right", va="top", fontsize=10,
+            family="monospace", fontweight="bold",
+            bbox=dict(boxstyle="round", fc="white", ec="#888", alpha=0.92))
+    ax.legend(fontsize=9, loc="lower left")
+    _save(fig, outdir / "chart1_rank_ic.png")
 
-    a2.bar(dec["lag"], dec["avg_ic"] * 100, color=PALETTE["primary"], alpha=0.85)
-    a2.axhline(0, color="#444", lw=0.7)
-    a2.set_xlabel("lag (months ahead)")
-    a2.set_ylabel("avg rank IC (%)")
-    a2.set_xticks(list(dec["lag"]))
-    a2b = a2.twinx()
-    a2b.plot(dec["lag"], dec["success"] * 100, color=PALETTE["green"], marker="o", lw=1.4)
-    a2b.axhline(50, color=PALETTE["green"], lw=0.6, ls=":")
-    a2b.set_ylabel("success rate (%)", color=PALETTE["green"])
-    a2b.set_ylim(30, 75)
-    a2.set_title("2. IC decay (bars = avg IC, line = success rate)")
 
+# Chart 3
+def chart3_ic_decay(dec: pd.DataFrame, label: str, outdir: Path) -> None:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    ax.bar(dec["lag"], dec["avg_ic"] * 100, color="#1f3a5f", alpha=0.85, label="Avg IC")
+    ax.axhline(0, color="#444", lw=0.7)
+    ax.set_xticks(list(dec["lag"]))
+    ax.set_xlabel("lag (months ahead)")
+    ax.set_ylabel("Avg rank IC (%)")
+    axt = ax.twinx()
+    axt.plot(dec["lag"], dec["success"] * 100, color="#0a7a3a", marker="o", lw=1.7, label="Success rate")
+    axt.set_ylabel("Success rate (%)", color="#0a7a3a")
+    axt.set_ylim(20, 80)
+    axt.axhline(50, color="#0a7a3a", lw=0.6, ls=":")
+    ax.set_title(f"Chart 3: {label} for {UNIVERSE} (IC decay profile)",
+                 fontsize=11.5, fontweight="bold", loc="left")
+    ax.legend(loc="upper left", fontsize=9)
+    axt.legend(loc="upper right", fontsize=9)
+    _save(fig, outdir / "chart3_ic_decay.png")
+
+
+# Chart 5 (deciles or quintiles)
+def chart5_fractiles(qret: pd.DataFrame, mkt: pd.Series, label: str, n: int, outdir: Path) -> None:
     import matplotlib as mpl
+    import matplotlib.pyplot as plt
+    name = "Deciles" if n == 10 else "Quintiles"
+    fname = "chart5_deciles.png" if n == 10 else "chart5_quintiles.png"
+    fig, ax = plt.subplots(figsize=(11, 5.8))
+    cmap = mpl.colormaps["RdYlGn"](np.linspace(0.88, 0.12, len(qret.columns)))
+    for i, fc in enumerate(qret.columns):
+        ax.plot(qret.index, (1 + qret[fc].fillna(0)).cumprod().values,
+                lw=1.3, color=cmap[i], label=fc)
+    ax.plot(mkt.index, (1 + mkt.fillna(0)).cumprod().values, color="#222", lw=1.9, ls="--", label="Market")
+    ax.set_yscale("log")
+    ax.set_ylabel("Growth of $1 (log)")
+    ax.set_title(f"Chart 5: {label} for {UNIVERSE} ({name})",
+                 fontsize=11.5, fontweight="bold", loc="left")
+    ax.legend(fontsize=7.5, ncol=(4 if n == 10 else 3), loc="upper left")
+    _save(fig, outdir / fname)
 
-    fcolors = mpl.colormaps["RdYlGn"](np.linspace(0.88, 0.12, len(qret.columns)))
-    for i, dc in enumerate(qret.columns):
-        a3.plot(qret.index, (1 + qret[dc].fillna(0)).cumprod().values,
-                lw=1.2, color=fcolors[i], label=dc)
-    a3.plot(mkt.index, (1 + mkt.fillna(0)).cumprod().values, color="#222", lw=1.8, ls="--", label="Market")
-    a3.set_yscale("log")
-    a3.set_title(f"3. Fractiles — growth of $1 (D1 = top decile, D{N_FRACTILES} = bottom)")
-    a3.set_ylabel("growth of $1 (log)")
-    a3.legend(fontsize=6.5, ncol=4, loc="upper left")
 
-    a4.plot(pfr.index, (1 + pfr["pure"]).cumprod().values * 100, color=PALETTE["primary"], lw=1.9, label="pure")
-    a4.plot(pfr.index, (1 + pfr["raw"]).cumprod().values * 100, color=PALETTE["muted"], lw=1.3, label="raw")
-    a4.set_title("4. Pure vs raw factor return (1-SD exposure, index = 100)")
-    a4.set_ylabel("index")
-    a4.legend(fontsize=8, loc="upper left")
-    txt = (f"pure: ann {pst['ann_return'] * 100:5.1f}%  IR {pst['info_ratio']:.2f}  "
-           f"t {pst['t_stat']:.2f}  hit {pst['success'] * 100:.0f}%\n"
-           f"raw : ann {rst['ann_return'] * 100:5.1f}%  IR {rst['info_ratio']:.2f}  t {rst['t_stat']:.2f}")
-    a4.text(0.02, 0.97, txt, transform=a4.transAxes, va="top", fontsize=7.5, family="monospace",
-            bbox=dict(boxstyle="round", fc="white", ec="#ccc", alpha=0.85))
+# Table 1 (quintile stats rendered as image)
+TABLE_ROWS = [
+    ("Total return", "total_return", "pct"),
+    ("Active return", "active_return", "pct"),
+    ("Tracking error", "tracking_error", "pct"),
+    ("Information ratio", "info_ratio", "num"),
+    ("t-stat (IR)", "t_stat", "num"),
+    ("Monthly success rate", "monthly_success", "pct"),
+    ("Turnover", "turnover", "pct"),
+    ("Volatility", "volatility", "pct"),
+    ("Sharpe ratio", "sharpe", "num"),
+    ("CAPM Beta (vs benchmark)", "capm_beta", "num"),
+    ("CAPM Alpha", "capm_alpha", "pct"),
+]
 
-    fig.suptitle(f"{label}  ·  {group.capitalize()} factor  ·  S&P 500, 2010-2026 (gross)",
-                 fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
-    save_fig(fig, col.replace("_rk", ""), subdir="factors")
 
-    top = ftbl.loc["D1"]
-    ls = ftbl.loc[f"D1-D{N_FRACTILES}"]
-    summary = {"group": group, "factor": label, "mean_ic_%": icst["mean_ic"] * 100, "ic_t": icst["t_stat"],
-               "ic_hit_%": icst["success"] * 100, "Top_active_%": top["active_return"] * 100, "Top_IR": top["info_ratio"],
-               "TopBot_ann_%": ls["total_return"] * 100, "TopBot_IR": ls["info_ratio"], "Top_turnover_%": top["turnover"] * 100,
-               "pure_ann_%": pst["ann_return"] * 100, "pure_IR": pst["info_ratio"], "pure_t": pst["t_stat"],
-               "raw_ann_%": rst["ann_return"] * 100}
-    return summary, ftbl.assign(group=group, factor=label).rename_axis("fractile").reset_index()
+def _fmt(v: float, kind: str) -> str:
+    if pd.isna(v):
+        return "—"
+    return f"{v * 100:.2f}%" if kind == "pct" else f"{v:.2f}"
+
+
+def table1_quintile_stats(panel: pd.DataFrame, col: str, label: str, outdir: Path) -> pd.DataFrame:
+    import matplotlib.pyplot as plt
+    _, _, tbl = fractiles(panel, col, n=5)
+    cols = [f"Quintile {i}" for i in range(1, 6)] + ["Q1-Q5", "Market"]
+    src_cols = [f"Q{i}" for i in range(1, 6)] + ["Q1-Q5", "Market"]
+
+    cell_text = []
+    for label_row, key, kind in TABLE_ROWS:
+        row = []
+        for sc in src_cols:
+            v = tbl.loc[sc, key] if sc in tbl.index else np.nan
+            row.append(_fmt(v, kind))
+        cell_text.append(row)
+    row_labels = [r[0] for r in TABLE_ROWS]
+
+    fig, ax = plt.subplots(figsize=(13, 5.2))
+    ax.axis("off")
+    ax.set_title(f"Table 1: {label} for {UNIVERSE}", fontsize=12, fontweight="bold", loc="left", pad=14)
+    tbl_obj = ax.table(cellText=cell_text, rowLabels=row_labels, colLabels=cols,
+                       cellLoc="center", loc="center",
+                       colWidths=[0.085] * 5 + [0.10, 0.085])
+    tbl_obj.auto_set_font_size(False)
+    tbl_obj.set_fontsize(9)
+    tbl_obj.scale(1, 1.55)
+    ncol = len(cols)
+    for j in range(ncol):
+        c = tbl_obj[0, j]
+        c.set_facecolor("#1f3a5f")
+        c.set_text_props(color="white", fontweight="bold")
+    nrow = len(row_labels)
+    for i in range(nrow):
+        rl = tbl_obj[i + 1, -1]
+        rl.set_text_props(ha="right", fontweight="bold")
+        rl.set_facecolor("#e9ecf2")
+    _save(fig, outdir / "table1_quintile_stats.png")
+    return tbl
+
+
+# Chart 7 / 8 (cumulative pure/raw factor return index)
+def chart_cumulative_index(series: pd.Series, label: str, outdir: Path, *, pure: bool) -> dict:
+    import matplotlib.pyplot as plt
+    s = series.dropna()
+    cum = (1 + s).cumprod() * 100
+    stats = _series_stats(s)
+    chart_no = 7 if pure else 8
+    kind = "pure" if pure else "raw"
+    fname = f"chart{chart_no}_{kind}_factor_index.png"
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    ax.plot(cum.index, cum.values, color="#1f3a5f" if pure else "#7f7f7f", lw=2.0)
+    ax.axhline(100, color="#888", lw=0.7, ls="--")
+    txt = (f"Annualised {kind} return : {stats['ann_return'] * 100:6.2f}%\n"
+           f"Annualised tracking error: {stats['tracking_error'] * 100:6.2f}%\n"
+           f"{kind.capitalize()} information ratio : {stats['info_ratio']:6.2f}\n"
+           f"Monthly success rate     : {stats['success'] * 100:6.1f}%\n"
+           f"t-stat (IR)              : {stats['t_stat']:6.2f}")
+    ax.text(0.018, 0.97, txt, transform=ax.transAxes, va="top", ha="left", fontsize=9,
+            family="monospace", bbox=dict(boxstyle="round", fc="white", ec="#888", alpha=0.93))
+    ax.set_ylabel("Index (base 100)")
+    title = f"Chart {chart_no}: Index of {UNIVERSE} {kind} factor returns for {label}"
+    ax.set_title(title, fontsize=11.5, fontweight="bold", loc="left")
+    _save(fig, outdir / fname)
+    return stats
+
+
+# Chart 9 / 10 (monthly + 12m rolling pure/raw factor return)
+def chart_monthly_rolling(series: pd.Series, label: str, outdir: Path, *, pure: bool) -> None:
+    import matplotlib.pyplot as plt
+    s = series.dropna()
+    roll = s.rolling(12, min_periods=6).mean()
+    chart_no = 9 if pure else 10
+    kind = "pure" if pure else "raw"
+    fname = f"chart{chart_no}_{kind}_factor_returns.png"
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    ax.bar(s.index, s.values * 100, width=22, color="#bcbcbc", alpha=0.9, label=f"Monthly {kind}")
+    ax.plot(roll.index, roll.values * 100, color="#1f3a5f" if pure else "#5a5a5a",
+            lw=2.0, label="12m average")
+    ax.axhline(0, color="#444", lw=0.7)
+    ax.set_ylabel(f"{kind.capitalize()} factor return (%)")
+    title = f"Chart {chart_no}: {label} {kind} factor returns over time (monthly + 12m average)"
+    ax.set_title(title, fontsize=11.5, fontweight="bold", loc="left")
+    ax.legend(fontsize=9, loc="upper left")
+    _save(fig, outdir / fname)
+
+
+# --------------------------------------------------------------------------
+# Per-factor driver
+# --------------------------------------------------------------------------
+def factor_pack(panel: pd.DataFrame, family: str, label: str, slug: str, col: str) -> dict:
+    outdir = settings.charts_dir / "factors" / family / slug
+    ic = ic_monthly(panel, col)
+    icst = _ic_ts_stats(ic)
+    dec = ic_decay(panel, col)
+    qret10, mkt, _ = fractiles(panel, col, n=10)
+    qret5, _, tbl5 = fractiles(panel, col, n=5)
+    pfr = pure_factor_return(panel, col)
+
+    chart1_rank_ic(ic, label, outdir)
+    chart3_ic_decay(dec, label, outdir)
+    chart5_fractiles(qret10, mkt, label, 10, outdir)
+    chart5_fractiles(qret5, mkt, label, 5, outdir)
+    table1_quintile_stats(panel, col, label, outdir)
+    pure_stats = chart_cumulative_index(pfr["pure"], label, outdir, pure=True)
+    raw_stats = chart_cumulative_index(pfr["raw"], label, outdir, pure=False)
+    chart_monthly_rolling(pfr["pure"], label, outdir, pure=True)
+    chart_monthly_rolling(pfr["raw"], label, outdir, pure=False)
+
+    top = tbl5.loc["Q1"]
+    ls = tbl5.loc["Q1-Q5"]
+    return {
+        "group": family, "factor": label, "slug": slug,
+        "mean_ic_%": icst["mean_ic"] * 100, "ic_t": icst["t_stat"], "ic_hit_%": icst["success"] * 100,
+        "Q1_active_%": top["active_return"] * 100, "Q1_IR": top["info_ratio"],
+        "Q1Q5_ann_%": ls["total_return"] * 100, "Q1Q5_IR": ls["info_ratio"],
+        "Q1_turnover_%": top["turnover"] * 100,
+        "pure_ann_%": pure_stats["ann_return"] * 100, "pure_IR": pure_stats["info_ratio"], "pure_t": pure_stats["t_stat"],
+        "raw_ann_%": raw_stats["ann_return"] * 100, "raw_IR": raw_stats["info_ratio"], "raw_t": raw_stats["t_stat"],
+    }
 
 
 def main() -> None:
+    _setup_style()
     panel = build_factor_panel().sort_values(["date", "symbol"]).reset_index(drop=True)
-    facs = [(g, l, c) for g, l, c in factor_list() if c in panel.columns]
-    logger.info(f"building {len(facs)} factor tearsheets ...")
+    facs = [(f, lab, slug, col) for f, lab, slug, col in factor_list() if col in panel.columns]
+    logger.info(f"building per-factor packs for {len(facs)} factors -> charts/factors/<family>/<factor>/")
+    rows = []
+    for family, label, slug, col in facs:
+        logger.info(f"  {family}/{slug} ({col})")
+        rows.append(factor_pack(panel, family, label, slug, col))
     (PROJECT_ROOT / "reports").mkdir(parents=True, exist_ok=True)
-    summary, frac_all = [], []
-    for group, label, col in facs:
-        logger.info(f"  tearsheet: {label} ({col})")
-        row, ftbl = tearsheet(panel, group, label, col)
-        summary.append(row)
-        frac_all.append(ftbl)
-    sdf = pd.DataFrame(summary)
+    sdf = pd.DataFrame(rows)
     sdf.round(3).to_csv(PROJECT_ROOT / "reports" / "factor_report_summary.csv", index=False)
-    pd.concat(frac_all, ignore_index=True).round(4).to_csv(
-        PROJECT_ROOT / "reports" / "factor_report_fractiles.csv", index=False)
-    logger.info(f"wrote {len(facs)} tearsheets -> charts/factors/ + 2 CSVs\n"
+    logger.info(f"wrote {len(facs)} factor packs (9 files each) + reports/factor_report_summary.csv\n"
                 + sdf.round(2).to_string(index=False))
 
 
 if __name__ == "__main__":
     main()
-
