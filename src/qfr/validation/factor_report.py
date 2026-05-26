@@ -154,15 +154,31 @@ def _capm(r: pd.Series, mkt: pd.Series) -> tuple[float, float]:
     return beta, alpha
 
 
-def fractiles(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m", n: int = 10):
-    """Cumulative monthly returns + stats per fractile. n=10 -> D1..D10, n=5 -> Q1..Q5."""
-    d = panel.dropna(subset=[col, ret]).copy()
+def fractiles(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m", n: int = 10,
+              weighted: bool = False):
+    """Cumulative monthly returns + stats per fractile. n=10 -> D1..D10, n=5 -> Q1..Q5.
+
+    weighted=False -> equal-weight within fractile (each name 1/N).
+    weighted=True  -> market-cap-weight within fractile (so the result reflects
+    the larger-cap names; comparison vs equal-weight reveals if the factor
+    works better in small caps or large caps).
+    """
+    needed = [col, ret] + (["marketCap"] if weighted else [])
+    d = panel.dropna(subset=needed).copy()
     q = d.groupby("date")[col].transform(lambda s: pd.qcut(s.rank(method="first"), n, labels=False))
     d["B"] = (n - q).astype(int)  # B1 = top bucket (best factor score)
     prefix = "Q" if n == 5 else "D"
-    qret = d.groupby(["date", "B"])[ret].mean().unstack("B").sort_index()
+
+    if weighted:
+        d["wret"] = d["marketCap"] * d[ret]
+        qg = d.groupby(["date", "B"])
+        qret = (qg["wret"].sum() / qg["marketCap"].sum()).unstack("B").sort_index()
+        mg = d.groupby("date")
+        mkt = (mg["wret"].sum() / mg["marketCap"].sum()).sort_index()
+    else:
+        qret = d.groupby(["date", "B"])[ret].mean().unstack("B").sort_index()
+        mkt = d.groupby("date")[ret].mean().sort_index()
     qret.columns = [f"{prefix}{c}" for c in qret.columns]
-    mkt = d.groupby("date")[ret].mean().sort_index()
     mkt_ann = (1 + mkt).prod() ** (ANN / len(mkt)) - 1
     years = len(mkt) / ANN
     spread_name = f"{prefix}1-{prefix}{n}"
@@ -342,14 +358,14 @@ def _fmt(v: float, kind: str) -> str:
     return f"{v * 100:.2f}%" if kind == "pct" else f"{v:.2f}"
 
 
-def table1_quintile_stats(panel: pd.DataFrame, col: str, label: str, outdir: Path) -> pd.DataFrame:
+def _render_quintile_table(tbl: pd.DataFrame, title: str, outpath: Path) -> None:
+    """Render one quintile-stats table as a PNG."""
     import matplotlib.pyplot as plt
-    _, _, tbl = fractiles(panel, col, n=5)
-    cols = [f"Quintile {i}" for i in range(1, 6)] + ["Q1-Q5", "Market"]
+    cols = [f"Quintile {i}" for i in range(1, 6)] + ["Q1 − Q5\n(long − short)", "Market"]
     src_cols = [f"Q{i}" for i in range(1, 6)] + ["Q1-Q5", "Market"]
 
     cell_text = []
-    for label_row, key, kind in TABLE_ROWS:
+    for _, key, kind in TABLE_ROWS:
         row = []
         for sc in src_cols:
             v = tbl.loc[sc, key] if sc in tbl.index else np.nan
@@ -357,12 +373,12 @@ def table1_quintile_stats(panel: pd.DataFrame, col: str, label: str, outdir: Pat
         cell_text.append(row)
     row_labels = [r[0] for r in TABLE_ROWS]
 
-    fig, ax = plt.subplots(figsize=(13, 5.2))
+    fig, ax = plt.subplots(figsize=(13, 5.4))
     ax.axis("off")
-    ax.set_title(f"Table 1: {label} for {UNIVERSE}", fontsize=12, fontweight="bold", loc="left", pad=14)
+    ax.set_title(title, fontsize=12, fontweight="bold", loc="left", pad=18)
     tbl_obj = ax.table(cellText=cell_text, rowLabels=row_labels, colLabels=cols,
                        cellLoc="center", loc="center",
-                       colWidths=[0.085] * 5 + [0.10, 0.085])
+                       colWidths=[0.085] * 5 + [0.11, 0.085])
     tbl_obj.auto_set_font_size(False)
     tbl_obj.set_fontsize(9)
     tbl_obj.scale(1, 1.55)
@@ -376,8 +392,26 @@ def table1_quintile_stats(panel: pd.DataFrame, col: str, label: str, outdir: Pat
         rl = tbl_obj[i + 1, -1]
         rl.set_text_props(ha="right", fontweight="bold")
         rl.set_facecolor("#e9ecf2")
-    _save(fig, outdir / "table1_quintile_stats.png")
-    return tbl
+    fig.text(0.02, 0.02,
+             "Q1 = top quintile (best factor exposure, held long). Q5 = bottom quintile. "
+             "Q1−Q5 = long Q1 / short Q5.",
+             fontsize=8.5, style="italic", color="#555")
+    _save(fig, outpath)
+
+
+def table1_quintile_stats(panel: pd.DataFrame, col: str, label: str, outdir: Path):
+    """Render two quintile stats tables: equal-weighted and market-cap weighted."""
+    _, _, tbl_ew = fractiles(panel, col, n=5, weighted=False)
+    _, _, tbl_cw = fractiles(panel, col, n=5, weighted=True)
+    _render_quintile_table(
+        tbl_ew, f"Table 1: {label} for {UNIVERSE}  (equal-weighted within fractile)",
+        outdir / "table1_quintile_stats_equal_weighted.png",
+    )
+    _render_quintile_table(
+        tbl_cw, f"Table 1: {label} for {UNIVERSE}  (market-cap weighted within fractile)",
+        outdir / "table1_quintile_stats_cap_weighted.png",
+    )
+    return tbl_ew, tbl_cw
 
 
 # Chart 7 / 8 (cumulative pure/raw factor return index)
@@ -429,10 +463,26 @@ def chart_monthly_rolling(series: pd.Series, label: str, outdir: Path, *, pure: 
 # --------------------------------------------------------------------------
 # Per-factor driver
 # --------------------------------------------------------------------------
+def ic_2m_series(panel: pd.DataFrame, col: str) -> pd.Series:
+    """Monthly Spearman IC of the factor vs the return realised TWO months ahead."""
+    p = panel.sort_values(["symbol", "date"]).copy()
+    p["r2"] = p.groupby("symbol")["ret_fwd_1m"].shift(-1)  # return over [t+1, t+2]
+    out = {}
+    for d, g in p.groupby("date"):
+        sub = g[[col, "r2"]].dropna()
+        if len(sub) >= MIN_NAMES:
+            ic = sub[col].corr(sub["r2"], method="spearman")
+            if pd.notna(ic):
+                out[d] = ic
+    return pd.Series(out).sort_index()
+
+
 def factor_pack(panel: pd.DataFrame, family: str, label: str, slug: str, col: str) -> dict:
     outdir = settings.charts_dir / "factors" / family / slug
     ic = ic_monthly(panel, col)
     icst = _ic_ts_stats(ic)
+    ic2 = ic_2m_series(panel, col)
+    ic2st = _ic_ts_stats(ic2)
     dec = ic_decay(panel, col)
     qret10, mkt, _ = fractiles(panel, col, n=10)
     qret5, _, tbl5 = fractiles(panel, col, n=5)
@@ -453,12 +503,76 @@ def factor_pack(panel: pd.DataFrame, family: str, label: str, slug: str, col: st
     return {
         "group": family, "factor": label, "slug": slug,
         "mean_ic_%": icst["mean_ic"] * 100, "ic_t": icst["t_stat"], "ic_hit_%": icst["success"] * 100,
+        "mean_ic_2m_%": ic2st["mean_ic"] * 100, "ic_t_2m": ic2st["t_stat"],
         "Q1_active_%": top["active_return"] * 100, "Q1_IR": top["info_ratio"],
         "Q1Q5_ann_%": ls["total_return"] * 100, "Q1Q5_IR": ls["info_ratio"],
         "Q1_turnover_%": top["turnover"] * 100,
         "pure_ann_%": pure_stats["ann_return"] * 100, "pure_IR": pure_stats["info_ratio"], "pure_t": pure_stats["t_stat"],
         "raw_ann_%": raw_stats["ann_return"] * 100, "raw_IR": raw_stats["info_ratio"], "raw_t": raw_stats["t_stat"],
     }
+
+
+# --------------------------------------------------------------------------
+# Table 5: statistically significant factors
+# --------------------------------------------------------------------------
+def table5_significant_factors(rows: list[dict], threshold: float = 1.5, strict: float = 2.0) -> Path:
+    """Render Table 5: factors with |t-stat| >= threshold on at least one of
+    {IC 1m, IC 2m, pure factor return}. Cells where |t| >= strict are highlighted."""
+    import matplotlib.pyplot as plt
+
+    def max_t(r: dict) -> float:
+        return max(abs(r["ic_t"]), abs(r["ic_t_2m"]), abs(r["pure_t"]))
+
+    selected = [r for r in rows if max_t(r) >= threshold]
+    selected.sort(key=max_t, reverse=True)
+    n_strict = sum(1 for r in selected if max_t(r) >= strict)
+
+    hdrs = ["Factor group", "Factor", "Avg IC (1m, %)", "t-stat (IC, 1m)",
+            "t-stat (IC, 2m)", "t-stat (pure)"]
+    cell_text = [
+        [r["group"].capitalize(), r["factor"], f"{r['mean_ic_%']:.2f}%",
+         f"{r['ic_t']:.2f}", f"{r['ic_t_2m']:.2f}", f"{r['pure_t']:.2f}"]
+        for r in selected
+    ]
+
+    height = max(2.6, 0.42 * len(cell_text) + 1.6)
+    fig, ax = plt.subplots(figsize=(13, height))
+    ax.axis("off")
+    title = (f"Table 5: Statistically significant factors  "
+             f"(|t-stat| >= {threshold:.1f}; bold/green = strict |t-stat| >= {strict:.1f})")
+    ax.set_title(title, fontsize=12, fontweight="bold", loc="left", pad=14)
+
+    if not selected:
+        ax.text(0.5, 0.5, "(no factors meet the t-stat criterion)", ha="center", va="center", fontsize=11)
+        outpath = settings.charts_dir / "table5_significant_factors.png"
+        _save(fig, outpath)
+        return outpath
+
+    tbl_obj = ax.table(cellText=cell_text, colLabels=hdrs, cellLoc="center", loc="center",
+                       colWidths=[0.12, 0.30, 0.13, 0.13, 0.13, 0.12])
+    tbl_obj.auto_set_font_size(False)
+    tbl_obj.set_fontsize(9)
+    tbl_obj.scale(1, 1.55)
+    for j in range(len(hdrs)):
+        c = tbl_obj[0, j]
+        c.set_facecolor("#1f3a5f")
+        c.set_text_props(color="white", fontweight="bold")
+    # Bold + light-green any t-stat cell that itself crosses |t| >= strict
+    for i, r in enumerate(selected):
+        for j, tval in enumerate([r["ic_t"], r["ic_t_2m"], r["pure_t"]], start=3):
+            c = tbl_obj[i + 1, j]
+            if abs(tval) >= strict:
+                c.set_facecolor("#cfe6cf")
+                c.set_text_props(fontweight="bold")
+        tbl_obj[i + 1, 1].set_text_props(ha="left")
+    note = (f"Showing {len(selected)} factors at |t-stat| >= {threshold:.1f} on at least one test "
+            f"(of 1m IC, 2m IC, or pure factor return). "
+            f"{n_strict} cross strict significance (|t-stat| >= {strict:.1f}, highlighted). "
+            f"Sorted by max |t-stat|.")
+    fig.text(0.02, 0.02, note, fontsize=8.5, style="italic", color="#555")
+    outpath = settings.charts_dir / "table5_significant_factors.png"
+    _save(fig, outpath)
+    return outpath
 
 
 def main() -> None:
@@ -473,6 +587,8 @@ def main() -> None:
     (PROJECT_ROOT / "reports").mkdir(parents=True, exist_ok=True)
     sdf = pd.DataFrame(rows)
     sdf.round(3).to_csv(PROJECT_ROOT / "reports" / "factor_report_summary.csv", index=False)
+    t5_path = table5_significant_factors(rows)
+    logger.info(f"wrote Table 5 -> {t5_path}")
     logger.info(f"wrote {len(facs)} factor packs (9 files each) + reports/factor_report_summary.csv\n"
                 + sdf.round(2).to_string(index=False))
 
