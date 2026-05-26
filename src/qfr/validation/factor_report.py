@@ -1,15 +1,14 @@
-"""Part 4c - Per-factor tearsheets, Macquarie "A-Z of Quant" style.
+"""Part 4c - Per-factor tearsheets: the full factor-testing battery.
 
-For every individual factor we reproduce Macquarie's full factor-testing battery
-(Section Two of the A-Z), exactly:
+For every individual factor we run the standard quant factor-validation battery:
 
   1. Rank IC          monthly cross-sectional Spearman IC vs next-month return;
-                      mean IC (his bar: >4%), 12-month rolling IC, IC t-stat.
+                      mean IC, 12-month rolling IC, IC t-stat.
   2. IC decay         average IC at lags 1..12 months + per-lag success rate &
                       t-stat (how fast the market prices the signal away).
-  3. Fractiles        5 equal-weight quintiles (Q1 = best), monthly rebalanced:
+  3. Fractiles        10 equal-weight deciles (D1 = best), monthly rebalanced:
                       cumulative growth-of-$1 vs the universe + a stats table
-                      (Q1..Q5 + Q1-Q5 spread + Market: total/active return,
+                      (D1..D10 + D1-D10 spread + Market: total/active return,
                       tracking error, information ratio, t-stat(IR), monthly
                       success, turnover, volatility, Sharpe, CAPM alpha/beta).
   4. Pure factor ret  monthly cross-sectional (Fama-MacBeth) regression of the
@@ -19,7 +18,7 @@ For every individual factor we reproduce Macquarie's full factor-testing battery
                       cumulative, with annualised return / TE / IR / success / t.
 
 Each factor gets a 4-panel tearsheet PNG (charts/factors/<factor>.png) and a row
-in reports/factor_report_summary.csv (+ per-quintile stats in
+in reports/factor_report_summary.csv (+ per-decile stats in
 reports/factor_report_fractiles.csv).
 
 Run::  uv run python -m qfr.validation.factor_report
@@ -36,7 +35,7 @@ from qfr.utils.logging import logger
 
 ANN = 12
 MIN_NAMES = 20
-N_FRACTILES = 5
+N_FRACTILES = 10        # deciles (D1 = top, D{n} = bottom)
 MAX_LAG = 12
 
 LABELS = {
@@ -116,7 +115,7 @@ def ic_decay(panel: pd.DataFrame, col: str, max_lag: int = MAX_LAG) -> pd.DataFr
 
 
 # --------------------------------------------------------------------------
-# 3. Fractiles (quintiles, Q1 = best)
+# 3. Fractiles (deciles, D1 = best)
 # --------------------------------------------------------------------------
 def _turnover(members: pd.DataFrame) -> float:
     if members.empty:
@@ -139,11 +138,12 @@ def _capm(r: pd.Series, mkt: pd.Series) -> tuple[float, float]:
 def fractiles(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m", n: int = N_FRACTILES):
     d = panel.dropna(subset=[col, ret]).copy()
     q = d.groupby("date")[col].transform(lambda s: pd.qcut(s.rank(method="first"), n, labels=False))
-    d["Q"] = (n - q).astype(int)  # Q1 = top quintile (best factor score)
-    qret = d.groupby(["date", "Q"])[ret].mean().unstack("Q").sort_index()
-    qret.columns = [f"Q{c}" for c in qret.columns]
+    d["D"] = (n - q).astype(int)  # D1 = top decile (best factor score)
+    qret = d.groupby(["date", "D"])[ret].mean().unstack("D").sort_index()
+    qret.columns = [f"D{c}" for c in qret.columns]
     mkt = d.groupby("date")[ret].mean().sort_index()
     years = len(mkt) / ANN
+    spread_name = f"D1-D{n}"
 
     def stat_block(r: pd.Series, active_vs_mkt: bool) -> dict:
         ann_tot = (1 + r).prod() ** (ANN / len(r)) - 1
@@ -161,12 +161,12 @@ def fractiles(panel: pd.DataFrame, col: str, ret: str = "ret_fwd_1m", n: int = N
                 "capm_beta": beta, "capm_alpha": alpha}
 
     rows = {}
-    for qc in qret.columns:
-        rows[qc] = stat_block(qret[qc].dropna(), active_vs_mkt=True)
-        rows[qc]["turnover"] = _turnover(d[d["Q"] == int(qc[1:])][["date", "symbol"]])
-    spread = (qret["Q1"] - qret[f"Q{n}"]).dropna()
-    rows["Q1-Q5"] = stat_block(spread, active_vs_mkt=False)
-    rows["Q1-Q5"].update({"active_return": stat_block(spread, False)["total_return"], "turnover": np.nan})
+    for dc in qret.columns:
+        rows[dc] = stat_block(qret[dc].dropna(), active_vs_mkt=True)
+        rows[dc]["turnover"] = _turnover(d[d["D"] == int(dc[1:])][["date", "symbol"]])
+    spread = (qret["D1"] - qret[f"D{n}"]).dropna()
+    rows[spread_name] = stat_block(spread, active_vs_mkt=False)
+    rows[spread_name].update({"active_return": stat_block(spread, False)["total_return"], "turnover": np.nan})
     rows["Market"] = stat_block(mkt, active_vs_mkt=False)
     rows["Market"].update({"active_return": 0.0, "turnover": np.nan})
     tbl = pd.DataFrame(rows).T
@@ -259,13 +259,17 @@ def tearsheet(panel: pd.DataFrame, group: str, label: str, col: str):
     a2b.set_ylim(30, 75)
     a2.set_title("2. IC decay (bars = avg IC, line = success rate)")
 
-    for qc in qret.columns:
-        a3.plot(qret.index, (1 + qret[qc].fillna(0)).cumprod().values, lw=1.4, label=qc)
-    a3.plot(mkt.index, (1 + mkt.fillna(0)).cumprod().values, color="#444", lw=1.7, ls="--", label="Market")
+    import matplotlib as mpl
+
+    fcolors = mpl.colormaps["RdYlGn"](np.linspace(0.88, 0.12, len(qret.columns)))
+    for i, dc in enumerate(qret.columns):
+        a3.plot(qret.index, (1 + qret[dc].fillna(0)).cumprod().values,
+                lw=1.2, color=fcolors[i], label=dc)
+    a3.plot(mkt.index, (1 + mkt.fillna(0)).cumprod().values, color="#222", lw=1.8, ls="--", label="Market")
     a3.set_yscale("log")
-    a3.set_title("3. Fractiles — growth of $1 (Q1 = best quintile)")
+    a3.set_title(f"3. Fractiles — growth of $1 (D1 = top decile, D{N_FRACTILES} = bottom)")
     a3.set_ylabel("growth of $1 (log)")
-    a3.legend(fontsize=7, ncol=3, loc="upper left")
+    a3.legend(fontsize=6.5, ncol=4, loc="upper left")
 
     a4.plot(pfr.index, (1 + pfr["pure"]).cumprod().values * 100, color=PALETTE["primary"], lw=1.9, label="pure")
     a4.plot(pfr.index, (1 + pfr["raw"]).cumprod().values * 100, color=PALETTE["muted"], lw=1.3, label="raw")
@@ -283,10 +287,11 @@ def tearsheet(panel: pd.DataFrame, group: str, label: str, col: str):
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     save_fig(fig, col.replace("_rk", ""), subdir="factors")
 
-    q1, ls = ftbl.loc["Q1"], ftbl.loc["Q1-Q5"]
+    top = ftbl.loc["D1"]
+    ls = ftbl.loc[f"D1-D{N_FRACTILES}"]
     summary = {"group": group, "factor": label, "mean_ic_%": icst["mean_ic"] * 100, "ic_t": icst["t_stat"],
-               "ic_hit_%": icst["success"] * 100, "Q1_active_%": q1["active_return"] * 100, "Q1_IR": q1["info_ratio"],
-               "Q1Q5_ann_%": ls["total_return"] * 100, "Q1Q5_IR": ls["info_ratio"], "Q1_turnover_%": q1["turnover"] * 100,
+               "ic_hit_%": icst["success"] * 100, "Top_active_%": top["active_return"] * 100, "Top_IR": top["info_ratio"],
+               "TopBot_ann_%": ls["total_return"] * 100, "TopBot_IR": ls["info_ratio"], "Top_turnover_%": top["turnover"] * 100,
                "pure_ann_%": pst["ann_return"] * 100, "pure_IR": pst["info_ratio"], "pure_t": pst["t_stat"],
                "raw_ann_%": rst["ann_return"] * 100}
     return summary, ftbl.assign(group=group, factor=label).rename_axis("fractile").reset_index()

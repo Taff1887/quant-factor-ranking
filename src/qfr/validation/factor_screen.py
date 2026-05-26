@@ -1,27 +1,25 @@
-"""Part 4b - The "final factor screen" (Macquarie-style summary sheet).
+"""Part 4b - The "final factor screen": institutional summary sheet of factor stats.
 
-For every candidate factor - the six **family composites** plus their underlying
-**components** - we report, over the 2010+ window, the battery of statistics an
-institutional quant desk uses to *select* factors for a multi-factor model (cf.
-Macquarie Research, "A Practitioner's Guide to Factor Models"):
+For every candidate factor - the seven family composites plus their underlying
+components - we report, over the 2010+ window, the battery of statistics quant
+desks use to *select* factors for a multi-factor model:
 
     Avg Rank IC (lag 1m / 2m)  cross-sectional Spearman corr of the factor with
                                the return 1 and 2 months ahead - signal strength
                                and how fast it decays.
     Hit Rate (lag 1m / 2m)     share of months with a positive IC (consistency).
     t-stat (lag 1m / 2m)       mean_IC / std_IC * sqrt(N) - is the IC real?
-    Active Return top / bottom annualised return of the top / bottom quintile in
+    Active Return top / bottom annualised return of the top / bottom decile in
                                excess of the equal-weight universe (GROSS).
     Active Return top-bottom   annualised long-short (top minus bottom).
-    Tracking Error top / bot   annualised vol of the quintile's active return.
+    Tracking Error top / bot   annualised vol of the decile's active return.
     Information Ratio top / bot active return / tracking error.
-    Monthly Success top / bot  share of months the quintile beats the universe.
+    Monthly Success top / bot  share of months the decile beats the universe.
     Avg Turnover top / bottom  average one-way monthly name turnover (cost proxy).
 
-Macquarie's selection rule favours factors with **high & significant lag-1m/2m
-rank ICs**, **well-separated top vs bottom** active returns / IRs, and **low
-turnover**. Returns are gross so signal quality and trading cost (turnover) can
-be judged separately.
+Selection rule: favour factors with high & significant lag-1m/2m rank ICs, well-
+separated top vs bottom active returns / IRs, and low turnover. Returns are
+gross so signal quality and trading cost (turnover) can be judged separately.
 
 Run::  uv run python -m qfr.validation.factor_screen
 Outputs: reports/factor_screen.csv + charts/04b_factor_screen.png
@@ -37,7 +35,7 @@ from qfr.utils.config import PROJECT_ROOT
 from qfr.utils.logging import logger
 
 ANN = 12
-N_FRACTILES = 5          # quintiles (Macquarie "fractiles")
+N_FRACTILES = 10         # deciles (top 10% vs bottom 10%)
 MIN_NAMES = 20           # need a real cross-section for an IC
 TURNOVER_SKIP_FIRST = True
 
@@ -91,7 +89,7 @@ def _ic_stats(panel: pd.DataFrame, col: str, ret_col: str) -> dict:
 
 
 def _turnover(frame: pd.DataFrame) -> float:
-    """Average one-way monthly turnover of an equal-weight quintile."""
+    """Average one-way monthly turnover of an equal-weight decile."""
     if frame.empty:
         return np.nan
     w = frame.assign(w=1.0).pivot_table(index="date", columns="symbol", values="w",
@@ -172,7 +170,7 @@ def to_display(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fmt_cell(col: str, v: float) -> str:
-    """Match the Macquarie sheet: % on every column except t-stat and IR."""
+    """Match the screen layout: % on every column except t-stat and IR."""
     if pd.isna(v):
         return "-"
     if col in NO_PCT:
@@ -183,13 +181,13 @@ def _fmt_cell(col: str, v: float) -> str:
 
 
 def _selected(row: pd.Series) -> bool:
-    """Macquarie-style highlight: significant 1m/2m rank IC and/or a strong top IR."""
+    """Highlight factors meeting the screen criteria (significant IC or strong top IR)."""
     return bool((row["t_1m"] >= 1.5) or (row["t_2m"] >= 1.5) or (row["IR_top"] >= 0.30))
 
 
 def _panel(ax, disp: pd.DataFrame, cols: list[str], subhdr: list[str],
            spans: list[tuple[str, int, int]], colw: list[float], title: str) -> None:
-    """Render one Macquarie-style sub-table with a Group column + spanning headers."""
+    """Render one sub-table with a Group column + two-level spanning headers."""
     ax.axis("off")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -236,7 +234,7 @@ def _panel(ax, disp: pd.DataFrame, cols: list[str], subhdr: list[str],
 
 
 def make_figures(disp: pd.DataFrame) -> None:
-    """Two-panel Macquarie-style screen table -> charts/04b_factor_screen.png."""
+    """Two-panel summary screen table -> charts/04b_factor_screen.png."""
     import matplotlib.pyplot as plt
 
     from qfr.utils.viz import save_fig, set_plot_style
@@ -259,10 +257,10 @@ def make_figures(disp: pd.DataFrame) -> None:
     _panel(axA, disp, a_cols, a_sub, a_spans, a_w,
            "Signal: average rank IC %, hit rate % (months IC>0) and t-stat; active return ann. % (gross)")
     _panel(axB, disp, b_cols, b_sub, b_spans, b_w,
-           "Portfolio: top/bottom quintile vs equal-weight universe - tracking error %, information ratio, monthly success %, one-way turnover %")
+           "Portfolio: top/bottom decile vs equal-weight universe - tracking error %, information ratio, monthly success %, one-way turnover %")
     fig.text(0.5, 0.018,
              "Highlighted = factors that fit the criteria: high & significant 1m/2m rank ICs, well-distinguished top/bottom fractiles, lower turnover."
-             "   Bold = family composite.   Source: qfr factor screen, 2010-2026 (gross, quintiles).",
+             "   Bold = family composite.   Source: qfr factor screen, 2010-2026 (gross, deciles).",
              ha="center", fontsize=9, style="italic", color="#555")
     fig.subplots_adjust(top=0.94, bottom=0.05, hspace=0.16)
     save_fig(fig, "04b_factor_screen")
@@ -278,7 +276,7 @@ def main() -> None:
 
     with pd.option_context("display.width", 240, "display.max_columns", 40,
                            "display.max_rows", 60):
-        logger.info("Factor screen (2010+, gross, quintiles) - IC/hit/t in %, returns/TE/turnover ann.%:\n"
+        logger.info("Factor screen (2010+, gross, deciles) - IC/hit/t in %, returns/TE/turnover ann.%:\n"
                     + disp.to_string(index=False))
     logger.info(f"\nwrote reports/factor_screen.csv ({len(disp)} factors)")
 
