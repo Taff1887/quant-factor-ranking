@@ -22,7 +22,7 @@ separated top vs bottom active returns / IRs, and low turnover. Returns are
 gross so signal quality and trading cost (turnover) can be judged separately.
 
 Run::  uv run python -m qfr.validation.factor_screen
-Outputs: reports/factor_screen.csv + charts/04b_factor_screen.png
+Outputs: reports/factor_screen.csv + charts/factor_screen.png
 """
 
 from __future__ import annotations
@@ -234,7 +234,7 @@ def _panel(ax, disp: pd.DataFrame, cols: list[str], subhdr: list[str],
 
 
 def make_figures(disp: pd.DataFrame) -> None:
-    """Two-panel summary screen table -> charts/04b_factor_screen.png."""
+    """Two-panel summary screen table -> charts/factor_screen.png."""
     import matplotlib.pyplot as plt
 
     from qfr.utils.viz import save_fig, set_plot_style
@@ -263,7 +263,7 @@ def make_figures(disp: pd.DataFrame) -> None:
              "   Bold = family composite.   Source: qfr factor screen, 2010-2026 (gross, deciles).",
              ha="center", fontsize=9, style="italic", color="#555")
     fig.subplots_adjust(top=0.94, bottom=0.05, hspace=0.16)
-    save_fig(fig, "04b_factor_screen")
+    save_fig(fig, "factor_screen")
 
 
 def main() -> None:

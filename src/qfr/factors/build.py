@@ -244,52 +244,8 @@ def build() -> pd.DataFrame:
     return out
 
 
-def make_figures() -> None:
-    """Part 3 figures -> charts/03_*.png."""
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    from qfr.utils.viz import PALETTE, save_fig, set_plot_style
-
-    set_plot_style()
-    f = read_parquet(settings.processed_dir / "factors.parquet")
-    fams = list(FAMILIES) + ["size"]
-
-    fig, ax = plt.subplots(figsize=(7.5, 6))
-    sns.heatmap(f[fams].corr(), annot=True, fmt=".2f", cmap="vlag", center=0,
-                vmin=-1, vmax=1, square=True, cbar_kws={"label": "rank corr"}, ax=ax)
-    ax.set_title("Factor family correlations (2010+)")
-    save_fig(fig, "03_factor_correlation")
-
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-    for ax, fam in zip(axes.ravel(), fams):
-        d = f.dropna(subset=[fam, "ret_fwd_1m"]).copy()
-        d["q"] = d.groupby("date")[fam].transform(
-            lambda s: pd.qcut(s.rank(method="first"), 5, labels=[1, 2, 3, 4, 5])
-        )
-        sp = d.groupby("q", observed=True)["ret_fwd_1m"].mean() * 100
-        ax.bar([str(i) for i in sp.index], sp.values, color=PALETTE["primary"])
-        ax.axhline(0, color="#444", lw=0.8)
-        ax.set_title(f"{fam}")
-        ax.set_ylabel("mean fwd 1m ret (%)")
-        ax.set_xlabel("quintile (5 = high score)")
-    fig.suptitle("Preview: mean forward 1-month return by factor quintile (full IC analysis in Part 4)",
-                 fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    save_fig(fig, "03_factor_quintile_spread")
-
-    cov = f.groupby("date").size()
-    fig, ax = plt.subplots()
-    ax.plot(cov.index, cov.values, color=PALETTE["primary"], lw=1.5)
-    ax.set_ylim(0, 520)
-    ax.set_title("Investable names with full factor scores per month (2010+)")
-    ax.set_ylabel("number of names")
-    save_fig(fig, "03_factor_coverage")
-
-
 def main() -> None:
     build()
-    make_figures()
 
 
 if __name__ == "__main__":
