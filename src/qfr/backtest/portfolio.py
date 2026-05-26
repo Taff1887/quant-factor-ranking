@@ -92,6 +92,51 @@ def portfolio_monthly(panel: pd.DataFrame, score_col: str, *,
     return gross, net, one_way
 
 
+def longshort_monthly(panel: pd.DataFrame, score_col: str, *,
+                      n_buckets: int = 10, weight: str = "equal"):
+    """Dollar-neutral long-short: $1 long top bucket - $1 short bottom bucket.
+
+    Monthly rebalanced; transaction costs charged on BOTH legs (long + short)
+    at 10 bps per side of traded notional. Returns (gross, net, one_way_turnover)
+    where turnover is the combined fraction of the gross 2x exposure rebalanced.
+    """
+    d = panel.dropna(subset=[score_col, "ret_fwd_1m", "marketCap"]).copy()
+    d["bucket"] = d.groupby("date")[score_col].transform(
+        lambda s: pd.qcut(s.rank(method="first"), n_buckets, labels=False)
+    )
+    top = d[d["bucket"] == n_buckets - 1].copy()
+    bot = d[d["bucket"] == 0].copy()
+
+    def wcol(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        if weight == "equal":
+            df["w"] = 1.0 / df.groupby("date")["symbol"].transform("size")
+        else:
+            df["w"] = df["marketCap"] / df.groupby("date")["marketCap"].transform("sum")
+        return df
+
+    top, bot = wcol(top), wcol(bot)
+    long_r = top.groupby("date").apply(
+        lambda g: (g["w"] * g["ret_fwd_1m"]).sum(), include_groups=False)
+    short_r = bot.groupby("date").apply(
+        lambda g: (g["w"] * g["ret_fwd_1m"]).sum(), include_groups=False)
+    gross = long_r - short_r
+
+    top_w = top.pivot_table(index="date", columns="symbol", values="w", fill_value=0.0).sort_index()
+    bot_w = bot.pivot_table(index="date", columns="symbol", values="w", fill_value=0.0).sort_index()
+    traded_top = top_w.diff().abs().sum(axis=1)
+    traded_bot = bot_w.diff().abs().sum(axis=1)
+    if len(traded_top):
+        traded_top.iloc[0] = top_w.iloc[0].abs().sum()
+    if len(traded_bot):
+        traded_bot.iloc[0] = bot_w.iloc[0].abs().sum()
+    traded = traded_top.add(traded_bot, fill_value=0)
+    cost = traded * COST_PER_SIDE
+    net = gross - cost
+    one_way = 0.5 * traded
+    return gross, net, one_way
+
+
 def universe_return(panel: pd.DataFrame, *, weight: str = "cap") -> pd.Series:
     d = panel.dropna(subset=["ret_fwd_1m", "marketCap"]).copy()
     if weight == "cap":
@@ -154,11 +199,17 @@ def main() -> None:
     panel["composite"] = composite_score(panel, TOP_FACTORS)
     logger.info(f"Composite of top 5 factors: {TOP_FACTORS}")
 
-    # Strategies
+    # Long-only strategies
     g_d_ew, n_d_ew, t_d_ew = portfolio_monthly(panel, "composite", n_buckets=10, weight="equal")
     g_d_cw, n_d_cw, t_d_cw = portfolio_monthly(panel, "composite", n_buckets=10, weight="cap")
     g_q_ew, n_q_ew, t_q_ew = portfolio_monthly(panel, "composite", n_buckets=5, weight="equal")
     g_q_cw, n_q_cw, t_q_cw = portfolio_monthly(panel, "composite", n_buckets=5, weight="cap")
+
+    # Long-short strategies (dollar-neutral, D1-D10 or Q1-Q5)
+    lg_d_ew, ln_d_ew, lt_d_ew = longshort_monthly(panel, "composite", n_buckets=10, weight="equal")
+    lg_d_cw, ln_d_cw, lt_d_cw = longshort_monthly(panel, "composite", n_buckets=10, weight="cap")
+    lg_q_ew, ln_q_ew, lt_q_ew = longshort_monthly(panel, "composite", n_buckets=5, weight="equal")
+    lg_q_cw, ln_q_cw, lt_q_cw = longshort_monthly(panel, "composite", n_buckets=5, weight="cap")
 
     # Benchmarks
     u_cw = universe_return(panel, weight="cap")
@@ -166,13 +217,17 @@ def main() -> None:
     spy = fetch_spy_monthly()
 
     rets = pd.DataFrame({
-        "Top decile EW (net)":   n_d_ew,
-        "Top decile CW (net)":   n_d_cw,
-        "Top quintile EW (net)": n_q_ew,
-        "Top quintile CW (net)": n_q_cw,
-        "SPY (total return)":    spy,
-        "Cap-wtd universe":      u_cw,
-        "Equal-wtd universe":    u_ew,
+        "Top decile EW (net)":       n_d_ew,
+        "Top decile CW (net)":       n_d_cw,
+        "Top quintile EW (net)":     n_q_ew,
+        "Top quintile CW (net)":     n_q_cw,
+        "LS D1-D10 EW (net)":        ln_d_ew,
+        "LS D1-D10 CW (net)":        ln_d_cw,
+        "LS Q1-Q5 EW (net)":         ln_q_ew,
+        "LS Q1-Q5 CW (net)":         ln_q_cw,
+        "SPY (total return)":        spy,
+        "Cap-wtd universe":          u_cw,
+        "Equal-wtd universe":        u_ew,
     }).sort_index()
     # only keep months where strategy + SPY exist
     rets = rets.dropna(subset=["Top decile EW (net)", "SPY (total return)"])
@@ -188,7 +243,9 @@ def main() -> None:
     metrics["CAPM_alpha_vs_SPY_%"] = alphas
     metrics["avg_turnover_%"] = np.nan
     for k, ts in [("Top decile EW (net)", t_d_ew), ("Top decile CW (net)", t_d_cw),
-                  ("Top quintile EW (net)", t_q_ew), ("Top quintile CW (net)", t_q_cw)]:
+                  ("Top quintile EW (net)", t_q_ew), ("Top quintile CW (net)", t_q_cw),
+                  ("LS D1-D10 EW (net)", lt_d_ew), ("LS D1-D10 CW (net)", lt_d_cw),
+                  ("LS Q1-Q5 EW (net)", lt_q_ew), ("LS Q1-Q5 CW (net)", lt_q_cw)]:
         metrics.loc[k, "avg_turnover_%"] = ts.mean() * 100
 
     (PROJECT_ROOT / "reports").mkdir(parents=True, exist_ok=True)
@@ -248,7 +305,37 @@ def make_figures(rets: pd.DataFrame, metrics: pd.DataFrame) -> None:
     ax.legend(fontsize=8.5)
     save_fig(fig, "backtest_drawdowns")
 
-    # 3. Metrics table
+    # 3. Long-short cumulative (separate chart — much smaller magnitude)
+    ls_show = ["LS D1-D10 EW (net)", "LS D1-D10 CW (net)",
+               "LS Q1-Q5 EW (net)", "LS Q1-Q5 CW (net)"]
+    ls_colors = {
+        "LS D1-D10 EW (net)": "#1f3a5f", "LS D1-D10 CW (net)": "#456b9a",
+        "LS Q1-Q5 EW (net)": "#0a7a3a", "LS Q1-Q5 CW (net)": "#3aa56b",
+    }
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 8), height_ratios=[3, 2])
+    for col in ls_show:
+        if col not in rets:
+            continue
+        cum = (1 + rets[col].fillna(0)).cumprod()
+        ax1.plot(cum.index, cum.values, lw=1.7, color=ls_colors[col], label=col)
+    ax1.axhline(1.0, color="#444", lw=0.7, ls="--", label="zero (dollar-neutral)")
+    ax1.set_title("Long-short (dollar-neutral) cumulative growth — D1 long − D10 short / Q1 long − Q5 short",
+                  fontsize=12, fontweight="bold", loc="left")
+    ax1.set_ylabel("Growth of $1 (linear)")
+    ax1.legend(fontsize=8.5, loc="upper left")
+    for col in ls_show:
+        if col not in rets:
+            continue
+        cum = (1 + rets[col].fillna(0)).cumprod()
+        dd = (cum / cum.cummax() - 1) * 100
+        ax2.plot(dd.index, dd.values, lw=1.2, color=ls_colors[col], label=col)
+    ax2.axhline(0, color="#444", lw=0.7)
+    ax2.set_title("Long-short drawdowns (net)", fontsize=11, fontweight="bold", loc="left")
+    ax2.set_ylabel("Drawdown (%)")
+    fig.tight_layout()
+    save_fig(fig, "backtest_longshort")
+
+    # 4. Metrics table
     render_metrics_table(metrics)
 
 
