@@ -1,23 +1,28 @@
-"""Portfolio backtest: top-factor composite vs the S&P 500.
+"""Portfolio backtest of the top-5-factor composite vs SPY.
 
-Picks the 5 strongest individual factors from the screen (ROIC, ROE, FCF yield,
-Revenue growth, EPS growth - the "Top-5" composite that achieved a 1m-IC t-stat
-of 2.44 and a 2m-IC t-stat of 3.17), forms an equal-weight z-score composite,
-and back-tests four long-only monthly-rebalanced portfolios vs SPY:
+The composite is an equal-weight cross-sectional z-score of the five strongest
+individual factors from the screen (ROIC, ROE, FCF yield, revenue growth, EPS
+growth). Monthly rebalanced.
 
-    Top decile, equal-weight within     ~47 names, concentrated
-    Top decile, cap-weight within       ~47 names, large-cap tilt
-    Top quintile, equal-weight within   ~94 names, more diversified
-    Top quintile, cap-weight within     ~94 names, large-cap tilt
+We test four families of strategies:
 
-Each portfolio is charged 10 bps per side on traded notional (so a name turning
-over once costs 20 bps round-trip). The benchmark is SPY total return; we also
-report Jensen's alpha + beta vs SPY.
+  1. Long-only buckets (top decile / top quintile, equal- and cap-weight) -
+     the main practical implementation.
+  2. Dollar-neutral long-short (D1-D10, Q1-Q5, EW and CW) - a diagnostic for
+     whether the composite contains cross-sectional information.
+  3. Beta-neutral long-short - rescales the short leg by trailing 36-month
+     beta ratio so the realised portfolio beta is ~ zero. Diagnostic only.
+  4. Sector-neutral long-short - within-GICS-sector quintile spreads
+     aggregated equal-weight across sectors. Strips sector bets.
+
+Plus a battery of analytics:
+
+  - Cost sensitivity at 0, 5, 10, 25, 50 bps/side
+  - Gross vs net decomposition (raw alpha vs cost drag)
+  - Turnover breakdown (per leg, annualised, holding period)
+  - CAPM regression vs SPY (Jensen alpha + beta)
 
 Run::  uv run python -m qfr.backtest.portfolio
-Outputs: charts/backtest_cumulative.png, charts/backtest_drawdowns.png,
-         charts/backtest_metrics.png, reports/backtest_metrics.csv,
-         reports/backtest_monthly_returns.csv
 """
 
 from __future__ import annotations
@@ -30,9 +35,10 @@ from qfr.utils.config import PROJECT_ROOT, settings
 from qfr.utils.logging import logger
 
 ANN = 12
-COST_PER_SIDE = 0.001  # 10 bps per side
+DEFAULT_COST_PER_SIDE = 0.001  # 10 bps per side
+COST_LEVELS_BPS = [0, 5, 10, 25, 50]
+BETA_WINDOW = 36  # months for trailing beta estimation
 
-# The 5 strongest individual factors per Table 5 (max |t| from 1m IC, 2m IC, pure)
 TOP_FACTORS = [
     "returnOnInvestedCapital",   # quality
     "returnOnEquity",             # quality
@@ -43,7 +49,7 @@ TOP_FACTORS = [
 
 
 # --------------------------------------------------------------------------
-# Signal construction
+# Signal
 # --------------------------------------------------------------------------
 def cs_z(panel: pd.DataFrame, col: str) -> pd.Series:
     g = panel.groupby("date")[col]
@@ -61,82 +67,182 @@ def composite_score(panel: pd.DataFrame, cols: list[str]) -> pd.Series:
 
 
 # --------------------------------------------------------------------------
-# Portfolio construction
+# Helpers: bucket + weight
+# --------------------------------------------------------------------------
+def _assign_bucket(d: pd.DataFrame, score_col: str, n: int, group_cols: list[str]) -> pd.DataFrame:
+    d = d.copy()
+    d["bucket"] = d.groupby(group_cols)[score_col].transform(
+        lambda s: pd.qcut(s.rank(method="first"), n, labels=False, duplicates="drop")
+        if len(s) >= n else np.nan
+    )
+    return d
+
+
+def _weight_within(d: pd.DataFrame, group_cols: list[str], weight: str) -> pd.DataFrame:
+    d = d.copy()
+    if weight == "equal":
+        d["w"] = 1.0 / d.groupby(group_cols)["symbol"].transform("size")
+    else:
+        d["w"] = d["marketCap"] / d.groupby(group_cols)["marketCap"].transform("sum")
+    return d
+
+
+def _traded(weights_pivot: pd.DataFrame) -> pd.Series:
+    """Total notional traded each month (= sum of |delta_w| across stocks)."""
+    t = weights_pivot.diff().abs().sum(axis=1)
+    if len(t):
+        t.iloc[0] = weights_pivot.iloc[0].abs().sum()
+    return t
+
+
+# --------------------------------------------------------------------------
+# Strategy builders (all return dicts: name, gross, total_traded, + LS legs)
 # --------------------------------------------------------------------------
 def portfolio_monthly(panel: pd.DataFrame, score_col: str, *,
-                      n_buckets: int = 10, weight: str = "equal"):
-    """Long-only top-bucket portfolio, monthly rebalanced.
-
-    Returns (gross_returns, net_returns, one_way_turnover) as monthly series.
-    """
-    d = panel.dropna(subset=[score_col, "ret_fwd_1m", "marketCap"]).copy()
-    d["bucket"] = d.groupby("date")[score_col].transform(
-        lambda s: pd.qcut(s.rank(method="first"), n_buckets, labels=False)
-    )
-    top = d[d["bucket"] == n_buckets - 1].copy()
-    if weight == "equal":
-        top["w"] = 1.0 / top.groupby("date")["symbol"].transform("size")
-    else:  # cap
-        top["w"] = top["marketCap"] / top.groupby("date")["marketCap"].transform("sum")
-
+                      n_buckets: int = 10, weight: str = "equal",
+                      name: str | None = None) -> dict:
+    """Long-only top-bucket portfolio, monthly rebalanced."""
+    d = panel.dropna(subset=[score_col, "ret_fwd_1m", "marketCap"])
+    d = _assign_bucket(d, score_col, n_buckets, ["date"])
+    top = _weight_within(d[d["bucket"] == n_buckets - 1], ["date"], weight)
     gross = top.groupby("date").apply(
-        lambda g: (g["w"] * g["ret_fwd_1m"]).sum(), include_groups=False
-    )
+        lambda g: (g["w"] * g["ret_fwd_1m"]).sum(), include_groups=False)
     wmat = top.pivot_table(index="date", columns="symbol", values="w", fill_value=0.0).sort_index()
-    traded = wmat.diff().abs().sum(axis=1)   # total volume traded (buys + sells)
-    if len(traded):
-        traded.iloc[0] = wmat.iloc[0].abs().sum()  # initial build
-    cost = traded * COST_PER_SIDE
-    net = gross - cost
-    one_way = 0.5 * traded                   # one-way turnover (= % portfolio replaced)
-    return gross, net, one_way
+    traded = _traded(wmat)
+    return {
+        "name": name or f"Top {'decile' if n_buckets == 10 else 'quintile'} {weight.upper()[:2]}",
+        "kind": "long_only",
+        "gross": gross,
+        "total_traded": traded,
+        "top_traded": traded,
+        "bot_traded": pd.Series(0.0, index=traded.index),
+    }
 
 
 def longshort_monthly(panel: pd.DataFrame, score_col: str, *,
-                      n_buckets: int = 10, weight: str = "equal"):
-    """Dollar-neutral long-short: $1 long top bucket - $1 short bottom bucket.
-
-    Monthly rebalanced; transaction costs charged on BOTH legs (long + short)
-    at 10 bps per side of traded notional. Returns (gross, net, one_way_turnover)
-    where turnover is the combined fraction of the gross 2x exposure rebalanced.
-    """
-    d = panel.dropna(subset=[score_col, "ret_fwd_1m", "marketCap"]).copy()
-    d["bucket"] = d.groupby("date")[score_col].transform(
-        lambda s: pd.qcut(s.rank(method="first"), n_buckets, labels=False)
-    )
-    top = d[d["bucket"] == n_buckets - 1].copy()
-    bot = d[d["bucket"] == 0].copy()
-
-    def wcol(df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        if weight == "equal":
-            df["w"] = 1.0 / df.groupby("date")["symbol"].transform("size")
-        else:
-            df["w"] = df["marketCap"] / df.groupby("date")["marketCap"].transform("sum")
-        return df
-
-    top, bot = wcol(top), wcol(bot)
+                      n_buckets: int = 10, weight: str = "equal",
+                      name: str | None = None) -> dict:
+    """Dollar-neutral long-short: $1 long top bucket - $1 short bottom bucket."""
+    d = panel.dropna(subset=[score_col, "ret_fwd_1m", "marketCap"])
+    d = _assign_bucket(d, score_col, n_buckets, ["date"])
+    top = _weight_within(d[d["bucket"] == n_buckets - 1], ["date"], weight)
+    bot = _weight_within(d[d["bucket"] == 0], ["date"], weight)
     long_r = top.groupby("date").apply(
         lambda g: (g["w"] * g["ret_fwd_1m"]).sum(), include_groups=False)
     short_r = bot.groupby("date").apply(
         lambda g: (g["w"] * g["ret_fwd_1m"]).sum(), include_groups=False)
     gross = long_r - short_r
-
     top_w = top.pivot_table(index="date", columns="symbol", values="w", fill_value=0.0).sort_index()
     bot_w = bot.pivot_table(index="date", columns="symbol", values="w", fill_value=0.0).sort_index()
-    traded_top = top_w.diff().abs().sum(axis=1)
-    traded_bot = bot_w.diff().abs().sum(axis=1)
-    if len(traded_top):
-        traded_top.iloc[0] = top_w.iloc[0].abs().sum()
-    if len(traded_bot):
-        traded_bot.iloc[0] = bot_w.iloc[0].abs().sum()
+    traded_top, traded_bot = _traded(top_w), _traded(bot_w)
     traded = traded_top.add(traded_bot, fill_value=0)
-    cost = traded * COST_PER_SIDE
-    net = gross - cost
-    one_way = 0.5 * traded
-    return gross, net, one_way
+    label = "D1-D10" if n_buckets == 10 else "Q1-Q5"
+    return {
+        "name": name or f"LS {label} {weight.upper()[:2]}",
+        "kind": "long_short",
+        "gross": gross,
+        "total_traded": traded,
+        "top_traded": traded_top,
+        "bot_traded": traded_bot,
+        "long_leg": long_r,
+        "short_leg": short_r,
+    }
 
 
+def beta_neutral_ls(panel: pd.DataFrame, score_col: str, *, n_buckets: int = 10,
+                    weight: str = "equal", spy_monthly: pd.Series,
+                    window: int = BETA_WINDOW) -> dict:
+    """Long-short with the short leg scaled by trailing-window beta_long/beta_short
+    so the realised portfolio beta is approximately zero.
+
+    Caveat: rolling-beta estimates on 36-month windows are noisy. First `window`
+    months have no scale and are dropped from the net series.
+    """
+    base = longshort_monthly(panel, score_col, n_buckets=n_buckets, weight=weight)
+    long_r = base["long_leg"]
+    short_r = base["short_leg"]
+    spy = spy_monthly.reindex(long_r.index)
+
+    df = pd.concat([long_r.rename("L"), short_r.rename("S"), spy.rename("M")], axis=1).dropna()
+    var_m = df["M"].rolling(window).var()
+    beta_L = df["L"].rolling(window).cov(df["M"]) / var_m
+    beta_S = df["S"].rolling(window).cov(df["M"]) / var_m
+    # Use the prior-period estimate (no look-ahead)
+    scale = (beta_L / beta_S).shift(1).clip(lower=0.25, upper=4.0)   # guard against noise
+    gross = (df["L"] - scale * df["S"]).rename("bn_gross")
+
+    # Approximate traded: long leg + |scale| × short leg's traded
+    top_traded = base["top_traded"].reindex(gross.index)
+    bot_traded_scaled = base["bot_traded"].reindex(gross.index) * scale.abs().fillna(1.0)
+    traded = (top_traded + bot_traded_scaled).fillna(0)
+
+    label = "D1-D10" if n_buckets == 10 else "Q1-Q5"
+    return {
+        "name": f"Beta-neutral LS {label} {weight.upper()[:2]}",
+        "kind": "long_short",
+        "gross": gross,
+        "total_traded": traded,
+        "top_traded": top_traded,
+        "bot_traded": bot_traded_scaled,
+        "scale_factor": scale,
+    }
+
+
+def sector_neutral_ls(panel: pd.DataFrame, score_col: str, *,
+                      n_buckets: int = 5, weight: str = "equal") -> dict:
+    """Within-sector quintile spreads, aggregated equal-weight across sectors.
+
+    Strips sector bets - the residual is genuinely cross-sectional within-sector
+    selection. Uses quintiles (n=5) by default since sector cross-sections are
+    smaller (~40 names per sector, so a top-quintile gives ~8 stocks/leg).
+    """
+    d = panel.dropna(subset=[score_col, "ret_fwd_1m", "marketCap", "sector"])
+    # Drop (date, sector) cells with too few stocks to bucket
+    sec_size = d.groupby(["date", "sector"]).size()
+    keep_idx = sec_size[sec_size >= n_buckets].index
+    d = d.set_index(["date", "sector"]).loc[keep_idx].reset_index()
+
+    d = _assign_bucket(d, score_col, n_buckets, ["date", "sector"])
+    top = _weight_within(d[d["bucket"] == n_buckets - 1], ["date", "sector"], weight)
+    bot = _weight_within(d[d["bucket"] == 0], ["date", "sector"], weight)
+
+    # Each sector contributes 1 / n_sectors to the overall LS (equal-weight across sectors)
+    n_sec = d.groupby("date")["sector"].nunique().rename("n_sec")
+    top = top.merge(n_sec, on="date")
+    bot = bot.merge(n_sec, on="date")
+    top["w_scaled"] = top["w"] / top["n_sec"]
+    bot["w_scaled"] = -bot["w"] / bot["n_sec"]
+
+    long_r = top.groupby(["date", "sector"]).apply(
+        lambda g: (g["w"] * g["ret_fwd_1m"]).sum(), include_groups=False)
+    short_r = bot.groupby(["date", "sector"]).apply(
+        lambda g: (g["w"] * g["ret_fwd_1m"]).sum(), include_groups=False)
+    long_agg = long_r.unstack("sector").mean(axis=1)      # average across sectors (= equal-weight)
+    short_agg = short_r.unstack("sector").mean(axis=1)
+    gross = (long_agg - short_agg).rename("sn_gross")
+
+    # Turnover: aggregate stock-level signed weights and diff
+    combined = pd.concat([
+        top[["date", "symbol", "w_scaled"]],
+        bot[["date", "symbol", "w_scaled"]],
+    ], ignore_index=True)
+    stock_w = combined.groupby(["date", "symbol"])["w_scaled"].sum().unstack("symbol").fillna(0.0).sort_index()
+    traded = _traded(stock_w)
+
+    label = "Q1-Q5" if n_buckets == 5 else f"D1-D{n_buckets}"
+    return {
+        "name": f"Sector-neutral LS {label} {weight.upper()[:2]}",
+        "kind": "long_short",
+        "gross": gross,
+        "total_traded": traded,
+        "top_traded": traded * 0.5,  # symmetric estimate
+        "bot_traded": traded * 0.5,
+    }
+
+
+# --------------------------------------------------------------------------
+# Benchmarks
+# --------------------------------------------------------------------------
 def universe_return(panel: pd.DataFrame, *, weight: str = "cap") -> pd.Series:
     d = panel.dropna(subset=["ret_fwd_1m", "marketCap"]).copy()
     if weight == "cap":
@@ -148,23 +254,18 @@ def universe_return(panel: pd.DataFrame, *, weight: str = "cap") -> pd.Series:
     )
 
 
-# --------------------------------------------------------------------------
-# SPY (true S&P 500 benchmark) - pull from FMP
-# --------------------------------------------------------------------------
 def fetch_spy_monthly(start: str = "2009-12-01", end: str = "2026-05-31") -> pd.Series:
-    """SPY total return month-end series, aligned to our ret_fwd_1m convention."""
     from qfr.data.fmp_client import FMPClient
     rows = FMPClient().historical_prices("SPY", from_date=start, to_date=end,
                                          series="dividend-adjusted")
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
     monthly = df.set_index("date").sort_index()["adjClose"].resample("ME").last()
-    # ret_fwd_1m at month-end t = price(t+1)/price(t) - 1
     return (monthly.shift(-1) / monthly - 1).rename("SPY")
 
 
 # --------------------------------------------------------------------------
-# Metrics
+# Metrics & analytics
 # --------------------------------------------------------------------------
 def perf_metrics(r: pd.Series) -> dict:
     r = r.dropna()
@@ -172,14 +273,15 @@ def perf_metrics(r: pd.Series) -> dict:
     if n == 0:
         return {}
     cum = float((1 + r).prod())
-    cagr = cum ** (ANN / n) - 1
     sd = float(r.std())
     sharpe = float(r.mean() / sd * np.sqrt(ANN)) if sd > 0 else np.nan
     cc = (1 + r).cumprod()
     dd = float((cc / cc.cummax() - 1).min())
-    return dict(total_return=cum - 1, CAGR=cagr,
-                ann_vol=float(sd * np.sqrt(ANN)), Sharpe=sharpe,
-                max_drawdown=dd, hit_rate=float((r > 0).mean()), n_months=int(n))
+    return dict(
+        total_return=cum - 1, CAGR=cum ** (ANN / n) - 1,
+        ann_vol=float(sd * np.sqrt(ANN)), Sharpe=sharpe,
+        max_drawdown=dd, hit_rate=float((r > 0).mean()), n_months=int(n),
+    )
 
 
 def capm(r: pd.Series, mkt: pd.Series) -> tuple[float, float]:
@@ -191,187 +293,284 @@ def capm(r: pd.Series, mkt: pd.Series) -> tuple[float, float]:
     return float(beta), float(intercept * ANN)
 
 
+def net_returns(strat: dict, cost_per_side: float) -> pd.Series:
+    return (strat["gross"] - strat["total_traded"] * cost_per_side).rename(strat["name"])
+
+
+# Cost sensitivity
+def cost_sensitivity_table(strats: list[dict], spy: pd.Series,
+                           cost_levels_bps: list[int] = COST_LEVELS_BPS) -> pd.DataFrame:
+    """For each (strategy, cost level) report CAGR/vol/Sharpe/MaxDD/turnover/cost-drag/alpha."""
+    rows = []
+    for s in strats:
+        gross_alpha, beta = capm(s["gross"], spy)
+        for c_bps in cost_levels_bps:
+            cps = c_bps / 10000
+            net = s["gross"] - s["total_traded"] * cps
+            cost_drag_ann = (s["total_traded"] * cps).mean() * ANN
+            m = perf_metrics(net.dropna())
+            net_alpha = (gross_alpha - cost_drag_ann * 100) if pd.notna(gross_alpha) else np.nan
+            rows.append({
+                "strategy": s["name"], "cost_bps": c_bps,
+                "CAGR_%": m.get("CAGR", np.nan) * 100,
+                "ann_vol_%": m.get("ann_vol", np.nan) * 100,
+                "Sharpe": m.get("Sharpe", np.nan),
+                "max_drawdown_%": m.get("max_drawdown", np.nan) * 100,
+                "ann_turnover_%": s["total_traded"].mean() * 0.5 * ANN * 100,  # one-way ann
+                "cost_drag_%": cost_drag_ann * 100,
+                "Jensen_alpha_%": net_alpha if pd.notna(net_alpha) else np.nan,
+                "beta": beta,
+            })
+    return pd.DataFrame(rows)
+
+
+def gross_vs_net_table(strats: list[dict], cost_per_side: float = DEFAULT_COST_PER_SIDE) -> pd.DataFrame:
+    rows = []
+    for s in strats:
+        gross = s["gross"]
+        net = gross - s["total_traded"] * cost_per_side
+        cost_drag_ann = (s["total_traded"] * cost_per_side).mean() * ANN
+        mg, mn = perf_metrics(gross), perf_metrics(net.dropna())
+        rows.append({
+            "strategy": s["name"],
+            "gross_CAGR_%": mg.get("CAGR", np.nan) * 100,
+            "cost_drag_pa_%": cost_drag_ann * 100,
+            "net_CAGR_%": mn.get("CAGR", np.nan) * 100,
+            "gross_Sharpe": mg.get("Sharpe", np.nan),
+            "net_Sharpe": mn.get("Sharpe", np.nan),
+            "ann_turnover_pa_%": s["total_traded"].mean() * 0.5 * ANN * 100,
+        })
+    return pd.DataFrame(rows)
+
+
+def turnover_analysis(strats: list[dict]) -> pd.DataFrame:
+    rows = []
+    for s in strats:
+        tt = s["total_traded"].mean()
+        tt_long = s.get("top_traded", pd.Series([np.nan])).mean()
+        tt_short = s.get("bot_traded", pd.Series([np.nan])).mean()
+        one_way = 0.5 * tt
+        # holding period in months ~ 1 / one_way_turnover  (clip to avoid div-by-zero)
+        hp = float(1.0 / max(one_way, 1e-9))
+        rows.append({
+            "strategy": s["name"], "kind": s["kind"],
+            "monthly_one_way_turnover_%": one_way * 100,
+            "ann_turnover_pa_%": one_way * ANN * 100,
+            "long_leg_monthly_turnover_%": tt_long * 0.5 * 100 if pd.notna(tt_long) else np.nan,
+            "short_leg_monthly_turnover_%": tt_short * 0.5 * 100 if pd.notna(tt_short) else np.nan,
+            "avg_holding_period_months": hp,
+        })
+    return pd.DataFrame(rows)
+
+
+def summary_metrics_table(strats: list[dict], spy: pd.Series,
+                          cost_per_side: float = DEFAULT_COST_PER_SIDE) -> pd.DataFrame:
+    rows = []
+    for s in strats:
+        net = (s["gross"] - s["total_traded"] * cost_per_side).dropna()
+        m = perf_metrics(net)
+        beta, alpha_ann = capm(net, spy)
+        rows.append({
+            "strategy": s["name"], "kind": s["kind"],
+            "CAGR_%": m["CAGR"] * 100, "ann_vol_%": m["ann_vol"] * 100,
+            "Sharpe": m["Sharpe"], "max_drawdown_%": m["max_drawdown"] * 100,
+            "beta_vs_SPY": beta, "Jensen_alpha_%": alpha_ann * 100,
+            "ann_turnover_pa_%": s["total_traded"].mean() * 0.5 * ANN * 100,
+            "cost_drag_pa_%": (s["total_traded"] * cost_per_side).mean() * ANN * 100,
+        })
+    return pd.DataFrame(rows)
+
+
 # --------------------------------------------------------------------------
-# Run
+# Charts
 # --------------------------------------------------------------------------
-def main() -> None:
-    panel = build_factor_panel().sort_values(["date", "symbol"]).reset_index(drop=True)
-    panel["composite"] = composite_score(panel, TOP_FACTORS)
-    logger.info(f"Composite of top 5 factors: {TOP_FACTORS}")
-
-    # Long-only strategies
-    g_d_ew, n_d_ew, t_d_ew = portfolio_monthly(panel, "composite", n_buckets=10, weight="equal")
-    g_d_cw, n_d_cw, t_d_cw = portfolio_monthly(panel, "composite", n_buckets=10, weight="cap")
-    g_q_ew, n_q_ew, t_q_ew = portfolio_monthly(panel, "composite", n_buckets=5, weight="equal")
-    g_q_cw, n_q_cw, t_q_cw = portfolio_monthly(panel, "composite", n_buckets=5, weight="cap")
-
-    # Long-short strategies (dollar-neutral, D1-D10 or Q1-Q5)
-    lg_d_ew, ln_d_ew, lt_d_ew = longshort_monthly(panel, "composite", n_buckets=10, weight="equal")
-    lg_d_cw, ln_d_cw, lt_d_cw = longshort_monthly(panel, "composite", n_buckets=10, weight="cap")
-    lg_q_ew, ln_q_ew, lt_q_ew = longshort_monthly(panel, "composite", n_buckets=5, weight="equal")
-    lg_q_cw, ln_q_cw, lt_q_cw = longshort_monthly(panel, "composite", n_buckets=5, weight="cap")
-
-    # Benchmarks
-    u_cw = universe_return(panel, weight="cap")
-    u_ew = universe_return(panel, weight="equal")
-    spy = fetch_spy_monthly()
-
-    rets = pd.DataFrame({
-        "Top decile EW (net)":       n_d_ew,
-        "Top decile CW (net)":       n_d_cw,
-        "Top quintile EW (net)":     n_q_ew,
-        "Top quintile CW (net)":     n_q_cw,
-        "LS D1-D10 EW (net)":        ln_d_ew,
-        "LS D1-D10 CW (net)":        ln_d_cw,
-        "LS Q1-Q5 EW (net)":         ln_q_ew,
-        "LS Q1-Q5 CW (net)":         ln_q_cw,
-        "SPY (total return)":        spy,
-        "Cap-wtd universe":          u_cw,
-        "Equal-wtd universe":        u_ew,
-    }).sort_index()
-    # only keep months where strategy + SPY exist
-    rets = rets.dropna(subset=["Top decile EW (net)", "SPY (total return)"])
-
-    metrics = pd.DataFrame({k: perf_metrics(rets[k]) for k in rets}).T
-    bench = rets["SPY (total return)"]
-    metrics["alpha_vs_SPY_simple_%"] = (metrics["CAGR"] - perf_metrics(bench)["CAGR"]) * 100
-    betas, alphas = [], []
-    for k in rets:
-        b, a = capm(rets[k], bench)
-        betas.append(b); alphas.append(a * 100)
-    metrics["CAPM_beta_vs_SPY"] = betas
-    metrics["CAPM_alpha_vs_SPY_%"] = alphas
-    metrics["avg_turnover_%"] = np.nan
-    for k, ts in [("Top decile EW (net)", t_d_ew), ("Top decile CW (net)", t_d_cw),
-                  ("Top quintile EW (net)", t_q_ew), ("Top quintile CW (net)", t_q_cw),
-                  ("LS D1-D10 EW (net)", lt_d_ew), ("LS D1-D10 CW (net)", lt_d_cw),
-                  ("LS Q1-Q5 EW (net)", lt_q_ew), ("LS Q1-Q5 CW (net)", lt_q_cw)]:
-        metrics.loc[k, "avg_turnover_%"] = ts.mean() * 100
-
-    (PROJECT_ROOT / "reports").mkdir(parents=True, exist_ok=True)
-    metrics.round(4).to_csv(PROJECT_ROOT / "reports" / "backtest_metrics.csv")
-    rets.to_csv(PROJECT_ROOT / "reports" / "backtest_monthly_returns.csv")
-
-    make_figures(rets, metrics)
-    logger.info(f"\nBacktest summary:\n{metrics.round(3).to_string()}")
+def _save(fig, name: str) -> None:
+    from qfr.utils.viz import save_fig
+    save_fig(fig, name)
 
 
-def make_figures(rets: pd.DataFrame, metrics: pd.DataFrame) -> None:
+def chart_cumulative_long_only(strats: list[dict], spy: pd.Series, u_ew: pd.Series,
+                               cost_per_side: float) -> None:
     import matplotlib.pyplot as plt
-    from qfr.utils.viz import save_fig, set_plot_style
-
+    from qfr.utils.viz import set_plot_style
     set_plot_style()
-    show = ["Top decile EW (net)", "Top decile CW (net)",
-            "Top quintile EW (net)", "Top quintile CW (net)",
-            "SPY (total return)", "Equal-wtd universe"]
-    colors = {
-        "Top decile EW (net)": "#1f3a5f", "Top decile CW (net)": "#456b9a",
-        "Top quintile EW (net)": "#0a7a3a", "Top quintile CW (net)": "#3aa56b",
-        "SPY (total return)": "#222", "Equal-wtd universe": "#888",
-    }
-    styles = {
-        "Top decile EW (net)": "-", "Top decile CW (net)": "-",
-        "Top quintile EW (net)": "-", "Top quintile CW (net)": "-",
-        "SPY (total return)": "--", "Equal-wtd universe": ":",
-    }
-
-    # 1. Cumulative
     fig, ax = plt.subplots(figsize=(13, 6.5))
-    for col in show:
-        if col not in rets:
-            continue
-        cum = (1 + rets[col].fillna(0)).cumprod()
-        ax.plot(cum.index, cum.values, lw=1.8, color=colors[col],
-                ls=styles[col], label=col)
+    colors = ["#1f3a5f", "#456b9a", "#0a7a3a", "#3aa56b"]
+    for s, c in zip(strats, colors):
+        net = (s["gross"] - s["total_traded"] * cost_per_side).fillna(0)
+        cum = (1 + net).cumprod()
+        ax.plot(cum.index, cum.values, lw=1.8, color=c, label=s["name"])
+    ax.plot(spy.index, (1 + spy.fillna(0)).cumprod().values, lw=1.8, color="#222", ls="--", label="SPY (total return)")
+    ax.plot(u_ew.index, (1 + u_ew.fillna(0)).cumprod().values, lw=1.4, color="#888", ls=":", label="Equal-weighted universe")
     ax.set_yscale("log")
-    ax.set_title("Growth of $1 — top-5-factor portfolio vs S&P 500 (2010+, net of 10 bps/side)",
+    ax.set_title("Growth of $1 — 5-factor composite long-only portfolios vs SPY (2010+, net of 10 bps/side)",
                  fontsize=12, fontweight="bold", loc="left")
     ax.set_ylabel("Growth of $1 (log scale)")
     ax.legend(fontsize=8.5, loc="upper left")
-    save_fig(fig, "backtest_cumulative")
+    _save(fig, "backtest_cumulative")
 
-    # 2. Drawdowns
-    fig, ax = plt.subplots(figsize=(13, 5))
-    for col in show:
-        if col not in rets:
-            continue
-        cum = (1 + rets[col].fillna(0)).cumprod()
+
+def chart_longshort(strats: list[dict], cost_per_side: float) -> None:
+    import matplotlib.pyplot as plt
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    colors = ["#1f3a5f", "#456b9a", "#0a7a3a", "#3aa56b"]
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(13, 8), height_ratios=[3, 2])
+    for s, c in zip(strats, colors):
+        net = (s["gross"] - s["total_traded"] * cost_per_side).fillna(0)
+        cum = (1 + net).cumprod()
+        a1.plot(cum.index, cum.values, lw=1.7, color=c, label=s["name"])
+    a1.axhline(1.0, color="#444", lw=0.7, ls="--", label="dollar-neutral baseline")
+    a1.set_title("Long-short diagnostics — D1 long − D10 short / Q1 long − Q5 short  (dollar-neutral, net of 10 bps/side)",
+                 fontsize=12, fontweight="bold", loc="left")
+    a1.set_ylabel("Growth of $1 (linear)")
+    a1.legend(fontsize=8.5, loc="upper left")
+    for s, c in zip(strats, colors):
+        net = (s["gross"] - s["total_traded"] * cost_per_side).fillna(0)
+        cum = (1 + net).cumprod()
         dd = (cum / cum.cummax() - 1) * 100
-        ax.plot(dd.index, dd.values, lw=1.3, color=colors[col],
-                ls=styles[col], label=col)
+        a2.plot(dd.index, dd.values, lw=1.2, color=c, label=s["name"])
+    a2.axhline(0, color="#444", lw=0.7)
+    a2.set_title("Long-short drawdowns (net)", fontsize=11, fontweight="bold", loc="left")
+    a2.set_ylabel("Drawdown (%)")
+    fig.tight_layout()
+    _save(fig, "backtest_longshort")
+
+
+def chart_drawdowns(strats: list[dict], spy: pd.Series, cost_per_side: float) -> None:
+    import matplotlib.pyplot as plt
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    fig, ax = plt.subplots(figsize=(13, 5))
+    colors = ["#1f3a5f", "#456b9a", "#0a7a3a", "#3aa56b"]
+    for s, c in zip(strats, colors):
+        net = (s["gross"] - s["total_traded"] * cost_per_side).fillna(0)
+        cum = (1 + net).cumprod()
+        dd = (cum / cum.cummax() - 1) * 100
+        ax.plot(dd.index, dd.values, lw=1.3, color=c, label=s["name"])
+    cum_spy = (1 + spy.fillna(0)).cumprod()
+    dd_spy = (cum_spy / cum_spy.cummax() - 1) * 100
+    ax.plot(dd_spy.index, dd_spy.values, lw=1.5, color="#222", ls="--", label="SPY")
     ax.axhline(0, color="#444", lw=0.7)
-    ax.set_title("Drawdowns (net)", fontsize=12, fontweight="bold", loc="left")
+    ax.set_title("Drawdowns (net of 10 bps/side)", fontsize=12, fontweight="bold", loc="left")
     ax.set_ylabel("Drawdown (%)")
     ax.legend(fontsize=8.5)
-    save_fig(fig, "backtest_drawdowns")
-
-    # 3. Long-short cumulative (separate chart — much smaller magnitude)
-    ls_show = ["LS D1-D10 EW (net)", "LS D1-D10 CW (net)",
-               "LS Q1-Q5 EW (net)", "LS Q1-Q5 CW (net)"]
-    ls_colors = {
-        "LS D1-D10 EW (net)": "#1f3a5f", "LS D1-D10 CW (net)": "#456b9a",
-        "LS Q1-Q5 EW (net)": "#0a7a3a", "LS Q1-Q5 CW (net)": "#3aa56b",
-    }
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 8), height_ratios=[3, 2])
-    for col in ls_show:
-        if col not in rets:
-            continue
-        cum = (1 + rets[col].fillna(0)).cumprod()
-        ax1.plot(cum.index, cum.values, lw=1.7, color=ls_colors[col], label=col)
-    ax1.axhline(1.0, color="#444", lw=0.7, ls="--", label="zero (dollar-neutral)")
-    ax1.set_title("Long-short (dollar-neutral) cumulative growth — D1 long − D10 short / Q1 long − Q5 short",
-                  fontsize=12, fontweight="bold", loc="left")
-    ax1.set_ylabel("Growth of $1 (linear)")
-    ax1.legend(fontsize=8.5, loc="upper left")
-    for col in ls_show:
-        if col not in rets:
-            continue
-        cum = (1 + rets[col].fillna(0)).cumprod()
-        dd = (cum / cum.cummax() - 1) * 100
-        ax2.plot(dd.index, dd.values, lw=1.2, color=ls_colors[col], label=col)
-    ax2.axhline(0, color="#444", lw=0.7)
-    ax2.set_title("Long-short drawdowns (net)", fontsize=11, fontweight="bold", loc="left")
-    ax2.set_ylabel("Drawdown (%)")
-    fig.tight_layout()
-    save_fig(fig, "backtest_longshort")
-
-    # 4. Metrics table
-    render_metrics_table(metrics)
+    _save(fig, "backtest_drawdowns")
 
 
-def render_metrics_table(metrics: pd.DataFrame) -> None:
+def chart_cost_sensitivity(cs_df: pd.DataFrame) -> None:
     import matplotlib.pyplot as plt
-    from qfr.utils.viz import save_fig
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(14, 5.5))
+    for name, sub in cs_df.groupby("strategy"):
+        sub = sub.sort_values("cost_bps")
+        a1.plot(sub["cost_bps"], sub["Sharpe"], marker="o", lw=1.7, label=name)
+        a2.plot(sub["cost_bps"], sub["CAGR_%"], marker="o", lw=1.7, label=name)
+    for ax, ylab in zip([a1, a2], ["Sharpe ratio (net)", "CAGR (%, net)"]):
+        ax.set_xlabel("Transaction cost (bps per side)")
+        ax.set_ylabel(ylab)
+        ax.axhline(0, color="#444", lw=0.6)
+        ax.grid(alpha=0.3)
+    a1.legend(fontsize=8, loc="upper right")
+    fig.suptitle("Long-short cost sensitivity — Sharpe and CAGR by transaction-cost assumption",
+                 fontsize=12, fontweight="bold")
+    fig.tight_layout()
+    _save(fig, "backtest_cost_sensitivity")
 
-    keys = ["CAGR", "ann_vol", "Sharpe", "max_drawdown",
-            "CAPM_beta_vs_SPY", "CAPM_alpha_vs_SPY_%",
-            "alpha_vs_SPY_simple_%", "hit_rate", "avg_turnover_%"]
+
+def chart_gross_vs_net(gn_df: pd.DataFrame) -> None:
+    import matplotlib.pyplot as plt
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    df = gn_df.set_index("strategy").sort_values("gross_CAGR_%")
+    fig, ax = plt.subplots(figsize=(11, max(4, 0.55 * len(df) + 1.5)))
+    y = np.arange(len(df))
+    ax.barh(y, df["gross_CAGR_%"], color="#1f3a5f", alpha=0.85, label="Gross CAGR")
+    ax.barh(y, df["net_CAGR_%"], color="#3aa56b", alpha=0.85, label="Net CAGR")
+    for yi, (g, n) in enumerate(zip(df["gross_CAGR_%"], df["net_CAGR_%"])):
+        drag = g - n
+        ax.text(max(g, n) + 0.05, yi, f"  drag = {drag:.2f}%", va="center", fontsize=8, color="#555")
+    ax.set_yticks(y)
+    ax.set_yticklabels(df.index, fontsize=9)
+    ax.axvline(0, color="#444", lw=0.7)
+    ax.set_xlabel("CAGR (%)")
+    ax.set_title("Gross vs net CAGR — long-short portfolios at 10 bps/side", fontsize=12, fontweight="bold", loc="left")
+    ax.legend(fontsize=9, loc="lower right")
+    fig.tight_layout()
+    _save(fig, "backtest_gross_vs_net")
+
+
+def chart_turnover(to_df: pd.DataFrame) -> None:
+    import matplotlib.pyplot as plt
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    df = to_df.set_index("strategy")
+    fig, ax = plt.subplots(figsize=(11, max(4, 0.55 * len(df) + 1.5)))
+    y = np.arange(len(df))
+    long = df["long_leg_monthly_turnover_%"].fillna(0)
+    short = df["short_leg_monthly_turnover_%"].fillna(0)
+    ax.barh(y, long, color="#1f3a5f", alpha=0.85, label="Long-leg monthly turnover")
+    ax.barh(y, short, left=long, color="#bc4a3c", alpha=0.85, label="Short-leg monthly turnover")
+    for yi, (l, s, hp) in enumerate(zip(long, short, df["avg_holding_period_months"])):
+        ax.text(l + s + 0.5, yi, f"  ~{hp:.1f} mo holding", va="center", fontsize=8, color="#555")
+    ax.set_yticks(y)
+    ax.set_yticklabels(df.index, fontsize=9)
+    ax.set_xlabel("Monthly one-way turnover (%)")
+    ax.set_title("Turnover decomposition — monthly one-way per leg", fontsize=12, fontweight="bold", loc="left")
+    ax.legend(fontsize=9, loc="lower right")
+    fig.tight_layout()
+    _save(fig, "backtest_turnover")
+
+
+def chart_ls_neutral_variants(ls_dollar: dict, ls_beta: dict, ls_sector: dict,
+                              cost_per_side: float) -> None:
+    import matplotlib.pyplot as plt
+    from qfr.utils.viz import set_plot_style
+    set_plot_style()
+    variants = [
+        ("Dollar-neutral", ls_dollar, "#1f3a5f"),
+        ("Beta-neutral (trailing 36m)", ls_beta, "#bc4a3c"),
+        ("Sector-neutral (within-GICS)", ls_sector, "#0a7a3a"),
+    ]
+    fig, ax = plt.subplots(figsize=(13, 6))
+    for label, s, c in variants:
+        net = (s["gross"] - s["total_traded"] * cost_per_side).dropna()
+        cum = (1 + net.fillna(0)).cumprod()
+        ax.plot(cum.index, cum.values, lw=1.7, color=c, label=f"{label} ({s['name']})")
+    ax.axhline(1.0, color="#444", lw=0.7, ls="--")
+    ax.set_title("Long-short neutrality variants — dollar-neutral vs beta-neutral vs sector-neutral  (net of 10 bps/side)",
+                 fontsize=12, fontweight="bold", loc="left")
+    ax.set_ylabel("Growth of $1 (linear)")
+    ax.legend(fontsize=8.5, loc="upper left")
+    fig.tight_layout()
+    _save(fig, "backtest_ls_neutral_variants")
+
+
+def render_metrics_table(df: pd.DataFrame, title: str, out_name: str) -> None:
+    import matplotlib.pyplot as plt
+    keys = ["CAGR_%", "ann_vol_%", "Sharpe", "max_drawdown_%",
+            "beta_vs_SPY", "Jensen_alpha_%", "ann_turnover_pa_%", "cost_drag_pa_%"]
     headers = ["CAGR", "Ann. Vol", "Sharpe", "Max DD",
-               "Beta vs SPY", "Jensen α vs SPY",
-               "ΔCAGR vs SPY", "Hit Rate", "Avg Turnover"]
-    disp = metrics[keys].copy()
+               "β vs SPY", "Jensen α", "Ann. Turnover", "Cost Drag"]
+    disp = df.set_index("strategy")[keys]
 
     def fmt(k, v):
         if pd.isna(v):
             return "—"
-        if k in ("CAGR", "ann_vol", "max_drawdown", "hit_rate"):
-            return f"{v * 100:.2f}%"
-        if k in ("CAPM_alpha_vs_SPY_%", "alpha_vs_SPY_simple_%", "avg_turnover_%"):
+        if k in ("CAGR_%", "ann_vol_%", "max_drawdown_%",
+                 "Jensen_alpha_%", "ann_turnover_pa_%", "cost_drag_pa_%"):
             return f"{v:.2f}%"
         return f"{v:.2f}"
 
     cell_text = [[fmt(k, r[k]) for k in keys] for _, r in disp.iterrows()]
     row_labels = disp.index.tolist()
-
-    fig, ax = plt.subplots(figsize=(15, 0.45 * len(row_labels) + 1.6))
+    fig, ax = plt.subplots(figsize=(15, 0.45 * len(row_labels) + 1.7))
     ax.axis("off")
-    ax.set_title(
-        "Portfolio backtest — 5-factor composite vs SPY  (2010+, monthly rebalance, 10 bps/side costs)",
-        fontsize=12, fontweight="bold", loc="left", pad=14,
-    )
+    ax.set_title(title, fontsize=12, fontweight="bold", loc="left", pad=14)
     tbl = ax.table(cellText=cell_text, rowLabels=row_labels, colLabels=headers,
                    cellLoc="center", loc="center",
-                   colWidths=[0.08, 0.07, 0.07, 0.07, 0.08, 0.11, 0.10, 0.07, 0.10])
+                   colWidths=[0.08, 0.07, 0.07, 0.07, 0.08, 0.09, 0.10, 0.09])
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(9)
     tbl.scale(1, 1.6)
@@ -379,12 +578,11 @@ def render_metrics_table(metrics: pd.DataFrame) -> None:
         c = tbl[0, j]
         c.set_facecolor("#1f3a5f")
         c.set_text_props(color="white", fontweight="bold")
-    # Highlight rows where CAPM alpha is positive AND statistically meaningful (alpha > 1%)
     for i, (_, r) in enumerate(disp.iterrows()):
         rl = tbl[i + 1, -1]
         rl.set_text_props(ha="right", fontweight="bold")
         rl.set_facecolor("#e9ecf2")
-        alpha = r["CAPM_alpha_vs_SPY_%"]
+        alpha = r["Jensen_alpha_%"]
         if pd.notna(alpha) and alpha > 1.0:
             for j in range(len(headers)):
                 tbl[i + 1, j].set_facecolor("#cfe6cf")
@@ -393,10 +591,77 @@ def render_metrics_table(metrics: pd.DataFrame) -> None:
                 tbl[i + 1, j].set_facecolor("#f4d6d2")
     fig.text(0.02, 0.02,
              "Composite = equal-weight cross-sectional z-score of ROIC, ROE, FCF yield, "
-             "Revenue growth, EPS growth.  Long-only, monthly rebalance, 10 bps/side costs. "
-             "Green rows = positive Jensen α > 1%; red = negative α < −1%.",
+             "Revenue growth, EPS growth.  Monthly rebalance.  10 bps/side costs.",
              fontsize=8.5, style="italic", color="#555")
-    save_fig(fig, "backtest_metrics")
+    _save(fig, out_name)
+
+
+# --------------------------------------------------------------------------
+# Run
+# --------------------------------------------------------------------------
+def main() -> None:
+    panel = build_factor_panel().sort_values(["date", "symbol"]).reset_index(drop=True)
+    panel["composite"] = composite_score(panel, TOP_FACTORS)
+    logger.info(f"Composite of top 5 factors: {TOP_FACTORS}")
+
+    # Long-only
+    lo_dec_ew = portfolio_monthly(panel, "composite", n_buckets=10, weight="equal", name="Top decile EW")
+    lo_dec_cw = portfolio_monthly(panel, "composite", n_buckets=10, weight="cap",   name="Top decile CW")
+    lo_qui_ew = portfolio_monthly(panel, "composite", n_buckets=5,  weight="equal", name="Top quintile EW")
+    lo_qui_cw = portfolio_monthly(panel, "composite", n_buckets=5,  weight="cap",   name="Top quintile CW")
+
+    # Long-short (dollar-neutral)
+    ls_d_ew = longshort_monthly(panel, "composite", n_buckets=10, weight="equal", name="LS D1-D10 EW")
+    ls_d_cw = longshort_monthly(panel, "composite", n_buckets=10, weight="cap",   name="LS D1-D10 CW")
+    ls_q_ew = longshort_monthly(panel, "composite", n_buckets=5,  weight="equal", name="LS Q1-Q5 EW")
+    ls_q_cw = longshort_monthly(panel, "composite", n_buckets=5,  weight="cap",   name="LS Q1-Q5 CW")
+
+    long_only_strats = [lo_dec_ew, lo_dec_cw, lo_qui_ew, lo_qui_cw]
+    ls_strats = [ls_d_ew, ls_d_cw, ls_q_ew, ls_q_cw]
+
+    spy = fetch_spy_monthly()
+    u_ew = universe_return(panel, weight="equal")
+
+    # Neutrality variants (use Q1-Q5 EW as the diagnostic base)
+    ls_q_ew_beta = beta_neutral_ls(panel, "composite", n_buckets=5, weight="equal", spy_monthly=spy)
+    ls_q_ew_sector = sector_neutral_ls(panel, "composite", n_buckets=5, weight="equal")
+
+    # Tables
+    (PROJECT_ROOT / "reports").mkdir(parents=True, exist_ok=True)
+
+    summary_long_only = summary_metrics_table(long_only_strats, spy)
+    summary_ls = summary_metrics_table(ls_strats, spy)
+    summary_neutral = summary_metrics_table([ls_q_ew, ls_q_ew_beta, ls_q_ew_sector], spy)
+    cs_table = cost_sensitivity_table(ls_strats, spy)
+    gn_table = gross_vs_net_table(ls_strats)
+    to_table = turnover_analysis(long_only_strats + ls_strats)
+
+    summary_long_only.to_csv(PROJECT_ROOT / "reports" / "backtest_summary_long_only.csv", index=False)
+    summary_ls.to_csv(PROJECT_ROOT / "reports" / "backtest_summary_long_short.csv", index=False)
+    summary_neutral.to_csv(PROJECT_ROOT / "reports" / "backtest_ls_neutral_variants.csv", index=False)
+    cs_table.to_csv(PROJECT_ROOT / "reports" / "backtest_cost_sensitivity.csv", index=False)
+    gn_table.to_csv(PROJECT_ROOT / "reports" / "backtest_gross_vs_net.csv", index=False)
+    to_table.to_csv(PROJECT_ROOT / "reports" / "backtest_turnover.csv", index=False)
+
+    # Charts
+    chart_cumulative_long_only(long_only_strats, spy, u_ew, DEFAULT_COST_PER_SIDE)
+    chart_longshort(ls_strats, DEFAULT_COST_PER_SIDE)
+    chart_drawdowns(long_only_strats + [ls_q_ew], spy, DEFAULT_COST_PER_SIDE)
+    chart_cost_sensitivity(cs_table)
+    chart_gross_vs_net(gn_table)
+    chart_turnover(to_table)
+    chart_ls_neutral_variants(ls_q_ew, ls_q_ew_beta, ls_q_ew_sector, DEFAULT_COST_PER_SIDE)
+
+    render_metrics_table(summary_long_only, "Long-only portfolios — 5-factor composite vs SPY (net of 10 bps/side)", "backtest_metrics")
+    render_metrics_table(summary_ls, "Long-short diagnostics — dollar-neutral spreads on the 5-factor composite", "backtest_metrics_longshort")
+    render_metrics_table(summary_neutral, "Long-short neutrality variants — dollar-, beta- and sector-neutral", "backtest_metrics_neutral_variants")
+
+    logger.info(f"\n=== Long-only summary ===\n{summary_long_only.round(3).to_string(index=False)}")
+    logger.info(f"\n=== Long-short summary ===\n{summary_ls.round(3).to_string(index=False)}")
+    logger.info(f"\n=== Neutrality variants ===\n{summary_neutral.round(3).to_string(index=False)}")
+    logger.info(f"\n=== Cost sensitivity ===\n{cs_table.round(3).to_string(index=False)}")
+    logger.info(f"\n=== Gross vs net ===\n{gn_table.round(3).to_string(index=False)}")
+    logger.info(f"\n=== Turnover ===\n{to_table.round(3).to_string(index=False)}")
 
 
 if __name__ == "__main__":
