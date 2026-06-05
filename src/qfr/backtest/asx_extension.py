@@ -227,9 +227,9 @@ def main() -> None:
 
     # ---- Portfolios ----
     lo_dec_ew = portfolio_monthly(panel, "composite", n_buckets=10, weight="equal", name="Top decile EW")
-    lo_dec_cw = portfolio_monthly(panel, "composite", n_buckets=10, weight="cap",   name="Top decile CW (ff-adj)")
+    lo_dec_cw = portfolio_monthly(panel, "composite", n_buckets=10, weight="cap",   name="Top decile CW")
     lo_qui_ew = portfolio_monthly(panel, "composite", n_buckets=5,  weight="equal", name="Top quintile EW")
-    lo_qui_cw = portfolio_monthly(panel, "composite", n_buckets=5,  weight="cap",   name="Top quintile CW (ff-adj)")
+    lo_qui_cw = portfolio_monthly(panel, "composite", n_buckets=5,  weight="cap",   name="Top quintile CW")
     ls_q_ew   = longshort_monthly(panel, "composite", n_buckets=5,  weight="equal", name="LS Q1-Q5 EW")
     ls_q_sn   = sector_neutral_ls(panel, "composite", n_buckets=5,  weight="equal")
     ls_q_sn["name"] = "LS Q1-Q5 EW (sector-neutral)"

@@ -578,7 +578,7 @@ uv run python -m qfr.backtest.asx_extension    # IC + portfolios + diagnostics
 
 Same five-factor methodology applied to Australian large-caps, with an **independent data pipeline**:
 
-- **Universe from FMP**: top-250 ASX ordinaries by **current** market cap (filters out ETFs, funds, preference shares, non-ASX cross-listings via `company-screener`). Each month we then keep the PIT top-200 by free-float-adjusted market cap. **This is current-listed-only — see survivorship-bias warning above.**
+- **Universe from FMP**: top-250 ASX ordinaries by **current** market cap (filters out ETFs, funds, preference shares, non-ASX cross-listings via `company-screener`). Each month we then keep the PIT top-200 by **free-float-adjusted** market cap — this filter applies equally to every strategy below (long-only, LS, EW, CW). The free-float adjustment changes the *weights* of names in the cap-weighted books, but in EW books each name gets 1/N regardless, so the only effect of ff-adjustment on EW is which names are *in* the top-200 universe at all. **This is current-listed-only — see survivorship-bias warning above.**
 - **Prices from FMP** (`historical-price-eod/dividend-adjusted`): daily dividend-adjusted close, resampled to month-end. Forward returns winsorised at ±100 % to suppress unadjusted-corporate-action data errors.
 - **Fundamentals from FMP** (`key-metrics`, `financial-growth`, `cash-flow-statement`): PIT-joined via `acceptedDate` filing-date stamp, falling back to fiscal-date + 90 days when missing.
 - **Historical market cap from FMP** (`historical-market-capitalization`): true daily mcap series per ticker (not a price-ratio proxy), so the universe ranking each month reflects actual shares-outstanding × close at that date.
@@ -586,7 +586,7 @@ Same five-factor methodology applied to Australian large-caps, with an **indepen
 - **Realistic transaction costs**: headline results net of **25 bps/side** (vs the 10 bps used for the more-liquid S&P 500). Cost sensitivity also reported at 10 / 50 bps.
 - **Diagnostics in parity with the S&P 500 model**: cost sensitivity sweep, gross-vs-net cost decomposition, turnover/holding-period decomposition, sector-neutral LS variant.
 
-No part of the Short King 2.0 panel is used. Universe coverage: 243 unique tickers ever in the PIT-top-200 from 2009-12 through 2026-04 (197 months) — vs the **704** unique tickers in our PIT-clean S&P 500 universe over the same window, which is the gap caused by missing delisted ASX names. Benchmark: `IOZ.AX` (iShares Core S&P/ASX 200 ETF), dividend-adjusted total return.
+No part of the Short King 2.0 panel is used. Universe coverage: 243 unique tickers ever in the PIT-top-200 from 2009-12 through 2026-04 (197 months) — vs the **704** unique tickers in our PIT-clean S&P 500 universe over the same window, which is the gap caused by missing delisted ASX names. Benchmark: `IOZ.AX` (iShares Core S&P/ASX 200 ETF), **dividend-adjusted total return** (FMP `historical-price-eod/dividend-adjusted`; verified price-only CAGR 3.66 % + ~3.88 % distribution yield = 7.54 % total return CAGR). The strategy returns are also total return — `ret_fwd_1m` is computed from dividend-adjusted closes, so all comparisons are apples-to-apples.
 
 ### Per-factor rank IC
 
@@ -617,15 +617,17 @@ For comparison, the S&P 500 composite IC was 1.37 % @ 1m (t = 2.44), 2.58 % @ 3m
 
 ![ASX cumulative growth](charts/asx_cumulative.png)
 
+Every strategy below selects from the same universe (PIT top-200 by free-float-adjusted market cap, monthly). The label `CW` means weights ∝ free-float-adjusted market cap; `EW` means 1/N within bucket.
+
 | Strategy | CAGR | Vol | Sharpe | Max DD | β vs IOZ | CAPM α | Turnover | Survivorship exposure |
 |---|---|---|---|---|---|---|---|---|
-| **Top decile CW** (ff-adj) | **15.2 %** | 18.0 % | **0.88** | −29.6 % | 1.13 | **+6.97 %** | 299 % | **Low** — mega-caps always in index |
-| **Top quintile CW** (ff-adj) | **13.1 %** | 15.9 % | 0.86 | −27.3 % | 1.01 | **+6.01 %** | 266 % | **Low** |
+| **Top decile CW** | **15.2 %** | 18.0 % | **0.88** | −29.6 % | 1.13 | **+6.97 %** | 299 % | **Low** — mega-caps always in index |
+| **Top quintile CW** | **13.1 %** | 15.9 % | 0.86 | −27.3 % | 1.01 | **+6.01 %** | 266 % | **Low** |
 | LS Q1−Q5 EW (sector-neutral) | 9.2 % | 12.7 % | 0.76 | −21.8 % | −0.23 | +11.4 % | 399 % | Medium |
 | LS Q1−Q5 EW (dollar-neutral) | 10.6 % | 15.7 % | 0.73 | −36.1 % | −0.15 | +14.3 % | 343 % | Medium-high |
 | Top quintile EW | 26.2 % | 17.2 % | 1.46 | −34.4 % | 1.10 | +16.2 % | 193 % | **High** — EW upweights small-cap winners |
 | Top decile EW | 28.1 % | 19.1 % | 1.41 | −30.9 % | 1.11 | +17.7 % | 220 % | **High** |
-| **IOZ.AX (benchmark)** | 7.5 % | 12.9 % | 0.63 | −26.6 % | 1.00 | 0 | — | — |
+| **IOZ.AX (benchmark, total return)** | 7.5 % | 12.9 % | 0.63 | −26.6 % | 1.00 | 0 | — | — |
 
 **The cap-weighted free-float-adjusted books are the most credible result.** Top quintile CW realises a Sharpe of 0.86 and **+6.0 % annual Jensen alpha** — a defensible *upper-bound* estimate for what the factor model could earn on a tradeable ASX 200 strategy. Most of the alpha here comes from rotating between mega-caps (CBA, BHP, CSL, NAB) that were essentially always in the index, so survivorship contamination is minimal.
 
@@ -635,8 +637,8 @@ For comparison, the S&P 500 composite IC was 1.37 % @ 1m (t = 2.44), 2.58 % @ 3m
 
 | Strategy | Sharpe (10 bps) | Sharpe (25 bps) | Sharpe (50 bps) | α (10 bps) | α (25 bps) | α (50 bps) |
 |---|---|---|---|---|---|---|
-| Top decile CW (ff-adj) | 0.93 | 0.88 | 0.80 | +7.87 % | +6.97 % | +5.47 % |
-| Top quintile CW (ff-adj) | 0.90 | 0.86 | 0.78 | +6.81 % | +6.01 % | +4.68 % |
+| Top decile CW | 0.93 | 0.88 | 0.80 | +7.87 % | +6.97 % | +5.47 % |
+| Top quintile CW | 0.90 | 0.86 | 0.78 | +6.81 % | +6.01 % | +4.68 % |
 | LS Q1−Q5 EW | 0.80 | 0.73 | 0.61 | +15.2 % | +14.2 % | +12.5 % |
 | LS Q1−Q5 EW (sector-neutral) | 0.86 | 0.76 | 0.60 | +12.5 % | +11.3 % | +9.34 % |
 | Top quintile EW *(surv-biased)* | 1.49 | 1.46 | 1.41 | +16.8 % | +16.2 % | +15.3 % |
@@ -650,8 +652,8 @@ Cost drag is not the binding constraint on this strategy at any realistic level 
 
 | Strategy | Monthly turnover (one-way) | Long leg | Short leg | Avg holding period |
 |---|---|---|---|---|
-| Top decile CW (ff-adj) | 25.0 % | 25.0 % | — | 4.0 months |
-| Top quintile CW (ff-adj) | 22.1 % | 22.1 % | — | 4.5 months |
+| Top decile CW | 25.0 % | 25.0 % | — | 4.0 months |
+| Top quintile CW | 22.1 % | 22.1 % | — | 4.5 months |
 | Top decile EW | 18.4 % | 18.4 % | — | 5.4 months |
 | Top quintile EW | 16.1 % | 16.1 % | — | 6.2 months |
 | LS Q1−Q5 EW | 28.5 % | 16.1 % | 12.5 % | 3.5 months |
@@ -663,8 +665,8 @@ Top quintile CW holds ~4.5 months — operationally tractable.
 
 | Strategy | Gross CAGR | Cost drag | Net CAGR | Gross Sharpe | Net Sharpe |
 |---|---|---|---|---|---|
-| Top decile CW (ff-adj) | 16.9 % | 1.50 % | 15.2 % | 0.96 | 0.88 |
-| Top quintile CW (ff-adj) | 14.6 % | 1.33 % | 13.1 % | 0.94 | 0.86 |
+| Top decile CW | 16.9 % | 1.50 % | 15.2 % | 0.96 | 0.88 |
+| Top quintile CW | 14.6 % | 1.33 % | 13.1 % | 0.94 | 0.86 |
 | LS Q1−Q5 EW | 12.6 % | 1.71 % | 10.6 % | 0.84 | 0.73 |
 | LS sector-neutral | 11.4 % | 2.00 % | 9.2 % | 0.92 | 0.76 |
 | Top quintile EW *(surv-biased)* | 27.3 % | 0.97 % | 26.2 % | 1.51 | 1.46 |
