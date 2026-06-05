@@ -22,6 +22,7 @@
 11. [Next steps to make the long-short investable](#10-next-steps-to-make-the-long-short-potentially-investable)
 12. [Honest caveats](#11-honest-caveats)
 13. [Repo structure & how to reproduce](#12-repo-structure--how-to-reproduce)
+14. [Cross-market extension — ASX 200](#13-cross-market-extension--asx-200)
 
 ---
 
@@ -560,7 +561,76 @@ uv run python -m qfr.backtest.portfolio
 # 7. (Optional) Composite weighting variants
 #    EW vs IC vs IC-IR vs t-squared, with strict no-look-ahead and shrinkage
 uv run python -m qfr.backtest.composite_variants
+
+# 8. (Optional) ASX 200 extension — same methodology applied to Australian equities
+#    Re-uses the PIT panel from the companion Short King 2.0 project
+uv run python -m qfr.backtest.asx_extension
 ```
+
+---
+
+## 13. Cross-market extension — ASX 200
+
+Same five-factor methodology, same code path, applied to Australian large-caps (2010–2026, monthly rebalance, net of 10 bps/side). Re-uses the point-in-time panel built and maintained in the companion project [Short King 2.0](https://github.com/Taff1887/short-king-2.0) (500 ASX tickers, weekly cadence with `AsOfDate` / `ReleaseDate` filing-date lag), resampled to monthly and filtered each month to the **top 200 by market capitalisation** as a PIT proxy for the S&P/ASX 200 (FMP does not publish a historical-ASX 200-constituent endpoint, so cap-rank-200 is the cleanest stand-in).
+
+Universe: 378 unique tickers ever in the top-200-by-cap from 2010-06 through 2026-04 (191 months). Benchmark: `IOZ.AX` (iShares Core S&P/ASX 200 ETF), dividend-adjusted total return.
+
+### Per-factor rank IC
+
+| Factor | IC 1m | t-stat | Hit rate | IC 3m | t-stat |
+|---|---|---|---|---|---|
+| ROIC | 3.93 % | 4.30 | 64.4 % | 5.60 % | 6.24 |
+| ROE | 5.12 % | 5.07 | 63.4 % | 6.76 % | 7.26 |
+| **FCF yield** | **5.68 %** | **6.49** | **68.1 %** | **8.37 %** | **8.89** |
+| Revenue growth | 2.41 % | 3.05 | 59.2 % | 3.42 % | 4.60 |
+| EPS growth | 4.27 % | 5.42 | 64.4 % | 5.43 % | 7.20 |
+
+Every individual factor is significant at **|t| > 3**, with FCF yield the strongest — a much sharper picture than the S&P 500 screen where individual factors mostly sat at |t| < 2.
+
+### Composite rank IC
+
+| Horizon | Mean IC | IC IR | t-stat | Hit rate |
+|---|---|---|---|---|
+| 1 month | 5.74 % | 0.47 | **6.50** | 67.5 % |
+| 3 months | 7.22 % | 0.62 | **8.50** | 68.8 % |
+| 6 months | 8.34 % | 0.73 | **9.98** | 78.0 % |
+| 12 months | 8.01 % | 0.73 | **9.73** | 78.3 % |
+
+For comparison, the S&P 500 composite IC was 1.37 % @ 1m (t = 2.44), 2.58 % @ 3m (t = 4.41). The ASX composite is roughly **3-4× the IC** and **~2× the t-stat** of the US equivalent.
+
+### Portfolio results (net of 10 bps/side, vs IOZ.AX)
+
+![ASX cumulative growth](charts/asx_cumulative.png)
+
+| Strategy | CAGR | Vol | Sharpe | Max DD | β vs IOZ | **CAPM α** | Turnover |
+|---|---|---|---|---|---|---|---|
+| **Top decile CW** | **20.7 %** | 31.9 % | 0.73 | −49.8 % | 0.92 | **+15.10 %** | 337 % |
+| Top decile EW | 20.2 % | 20.4 % | 1.01 | −32.1 % | 1.00 | +11.25 % | 263 % |
+| **Top quintile EW** | 18.7 % | 17.2 % | **1.09** | −32.6 % | 1.02 | **+9.46 %** | 227 % |
+| Top quintile CW | 13.0 % | 22.0 % | 0.67 | −38.9 % | 0.85 | +7.52 % | 281 % |
+| LS Q1−Q5 EW (dollar-neutral) | **16.3 %** | 14.6 % | **1.11** | −23.2 % | −0.23 | **+19.62 %** | 433 % |
+| **IOZ.AX (benchmark)** | 7.5 % | 12.9 % | 0.63 | −26.6 % | 1.00 | 0 | — |
+
+![ASX rank IC bars](charts/asx_ic_bars.png)
+
+### Why the ASX numbers are so much stronger than the S&P 500 numbers
+
+This is consistent with what the academic literature on Australian equities consistently finds — the ASX is structurally less efficient than the US large-cap universe:
+
+- **Smaller, less analyst-covered names.** Median S&P 500 stock is followed by ~20 sell-side analysts; median ASX 200 name is followed by ~6.
+- **Home-bias in institutional money.** Australian super funds hold a heavy domestic equity overweight, and most are mandate-constrained to broad-market exposure rather than active factor strategies, leaving more anomaly premium uncaptured.
+- **Less arbitrage capital.** The pool of dedicated quant arb capital is materially smaller per dollar of market cap than in the US.
+- **Stronger small-cap premium within the index.** This shows up clearly in the spread between `Top quintile EW` (18.7 % CAGR) and `Top quintile CW` (13.0 %): equal-weighting within the top quintile harvests the small-cap component, cap-weighting concentrates back in the megacaps and gives most of that premium back.
+- **Stronger quality/value spread between top and bottom of the cross-section.** The LS Q1-Q5 spread reaches a level (16.3 % CAGR, 1.11 Sharpe, +19.6 % α) that simply does not exist in the S&P 500 LS variants (≤2.5 % CAGR, ≤0.32 Sharpe).
+
+### Caveats
+
+- **Universe is not a strict S&P/ASX 200 constituent reconstruction.** We use top-200-by-market-cap at each month-end as a PIT proxy. Real ASX 200 membership has additional liquidity/free-float screens not applied here.
+- **The 500-ticker source universe** comes from Short King 2.0 (ASIC-reportable shorts + ASX listings) — so some selection bias may remain at the long tail (small caps that never appeared in ASIC's short reporting could be absent). For the cap-weighted top-200 cut this matters very little.
+- **No cost-sensitivity / turnover / neutrality diagnostics here** (those analyses are in §8 for the S&P 500 model) — this section is intentionally a results-only condensation.
+- **Cost drag is low** (≤0.9 %/yr at 10 bps for the long-only books) but real-world AUS market impact + spread for small-caps is meaningfully higher than US; a more realistic implementation cost (~25-50 bps/side) would compress the long-only α by 1-3 %/yr and could materially compress the LS strategy.
+
+Artefacts: [`reports/asx_per_factor_ic.csv`](reports/asx_per_factor_ic.csv), [`reports/asx_composite_ic.csv`](reports/asx_composite_ic.csv), [`reports/asx_summary_long_only.csv`](reports/asx_summary_long_only.csv), [`reports/asx_summary_long_short.csv`](reports/asx_summary_long_short.csv). Code: [`src/qfr/backtest/asx_extension.py`](src/qfr/backtest/asx_extension.py).
 
 ---
 
