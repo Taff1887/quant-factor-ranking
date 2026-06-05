@@ -17,6 +17,7 @@ import pandas as pd
 from qfr.backtest.asx_pull_data import (
     FREEFLOAT_PARQUET,
     FUNDAMENTALS_PARQUET,
+    MCAP_HISTORY_PARQUET,
     PRICES_PARQUET,
     UNIVERSE_PARQUET,
 )
@@ -127,34 +128,34 @@ def pit_join_fundamentals(monthly_prices: pd.DataFrame,
 
 
 # --------------------------------------------------------------------------
-# Free-float-adjusted market cap
+# Free-float-adjusted market cap (uses true historical mcap from FMP)
 # --------------------------------------------------------------------------
 def add_ff_adjusted_mcap(panel: pd.DataFrame, freefloat: pd.DataFrame,
-                         prices: pd.DataFrame) -> pd.DataFrame:
-    """Estimate free-float-adjusted market cap at each (symbol, date).
+                         mcap_history: pd.DataFrame) -> pd.DataFrame:
+    """Apply free-float ratio to the historical market cap at each (symbol, date).
 
-    We don't have a HISTORICAL series of shares outstanding by date — so we
-    use the current shares_outstanding × current free_float_ratio scaled by
-    price ratio (price_t / price_now) as the historical proxy. This is the
-    standard practical approximation when historical sharecount data is
-    unavailable; it correctly captures the relative size of names but
-    treats free-float as constant over time.
+    Historical mcap comes from FMP's `historical-market-capitalization` endpoint
+    (true shares outstanding × close price at that date). Free-float ratio is
+    treated as constant per symbol (current Yahoo `floatShares / sharesOutstanding`)
+    since we don't have a historical free-float series. This is the standard
+    practical approximation when historical float data is unavailable.
     """
-    ff = freefloat[["symbol", "shares_outstanding", "free_float_ratio"]].copy()
-    # Get the latest price per symbol from the prices panel (proxy for "now")
-    latest = (prices.sort_values(["symbol", "date"])
-                    .groupby("symbol")["adjClose"].last()
-                    .rename("latest_close"))
-    ff = ff.merge(latest, on="symbol", how="left")
-    ff["current_mcap"] = ff["shares_outstanding"] * ff["latest_close"]
-    # Default to 1.0 free-float if Yahoo returned nothing (conservative — no penalty)
-    ff["free_float_ratio"] = ff["free_float_ratio"].fillna(1.0).clip(lower=0.1, upper=1.0)
-    ff["current_ff_mcap"] = ff["current_mcap"] * ff["free_float_ratio"]
+    mh = mcap_history.copy()
+    mh["date"] = pd.to_datetime(mh["date"])
+    # Resample daily mcap to month-end per ticker (last value in month)
+    mh["month_end"] = mh["date"] + pd.offsets.MonthEnd(0)
+    mh_monthly = (mh.sort_values(["symbol", "date"])
+                    .groupby(["symbol", "month_end"])
+                    .agg(true_mcap=("marketCap", "last"))
+                    .reset_index()
+                    .rename(columns={"month_end": "date"}))
 
-    p = panel.merge(ff[["symbol", "latest_close", "current_ff_mcap", "free_float_ratio"]],
-                    on="symbol", how="left")
-    # ff_marketCap_t = ff_marketCap_now × (price_t / price_now)
-    p["marketCap"] = p["current_ff_mcap"] * (p["adjClose"] / p["latest_close"])
+    ff = freefloat[["symbol", "free_float_ratio"]].copy()
+    ff["free_float_ratio"] = ff["free_float_ratio"].fillna(1.0).clip(lower=0.1, upper=1.0)
+
+    p = panel.merge(mh_monthly, on=["symbol", "date"], how="left")
+    p = p.merge(ff, on="symbol", how="left")
+    p["marketCap"] = p["true_mcap"] * p["free_float_ratio"].fillna(1.0)
     return p
 
 
@@ -186,16 +187,18 @@ def build_panel(force: bool = False) -> pd.DataFrame:
     prices = pd.read_parquet(PRICES_PARQUET)
     fundamentals = pd.read_parquet(FUNDAMENTALS_PARQUET)
     freefloat = pd.read_parquet(FREEFLOAT_PARQUET)
+    mcap_history = pd.read_parquet(MCAP_HISTORY_PARQUET)
 
     logger.info(f"  prices: {len(prices):,} rows, {prices['symbol'].nunique()} tickers")
     logger.info(f"  fundamentals: {len(fundamentals):,} rows, {fundamentals['symbol'].nunique()} tickers")
     logger.info(f"  freefloat: {freefloat['free_float_ratio'].notna().sum()}/{len(freefloat)} valid")
+    logger.info(f"  mcap history: {len(mcap_history):,} rows, {mcap_history['symbol'].nunique()} tickers")
 
     monthly = build_monthly_prices(prices)
     logger.info(f"  monthly prices: {len(monthly):,} rows")
 
     joined = pit_join_fundamentals(monthly, fundamentals)
-    joined = add_ff_adjusted_mcap(joined, freefloat, prices)
+    joined = add_ff_adjusted_mcap(joined, freefloat, mcap_history)
     joined = add_sector(joined, universe)
     panel = apply_universe_filter(joined, top_n=UNIVERSE_TOP_N)
 

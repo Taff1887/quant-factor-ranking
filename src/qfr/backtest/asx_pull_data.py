@@ -26,6 +26,7 @@ UNIVERSE_PARQUET = DATA_DIR / "asx_universe.parquet"
 PRICES_PARQUET = DATA_DIR / "asx_prices.parquet"
 FUNDAMENTALS_PARQUET = DATA_DIR / "asx_fundamentals.parquet"
 FREEFLOAT_PARQUET = DATA_DIR / "asx_freefloat.parquet"
+MCAP_HISTORY_PARQUET = DATA_DIR / "asx_mcap_history.parquet"
 
 PRICE_START = "2009-12-01"   # 1m buffer before our 2010-01 analysis start
 PRICE_END = "2026-05-31"
@@ -157,6 +158,40 @@ def pull_fundamentals(universe: pd.DataFrame, *, force_refresh: bool = False
 
 
 # --------------------------------------------------------------------------
+# Step 3b: Historical market capitalisation (true PIT mcap per stock)
+# --------------------------------------------------------------------------
+def pull_mcap_history(universe: pd.DataFrame, *, force_refresh: bool = False
+                      ) -> pd.DataFrame:
+    """Daily historical market cap per ticker via FMP. Replaces the buggy
+    'current_mcap × price ratio' proxy that ignores share-count changes."""
+    if MCAP_HISTORY_PARQUET.exists() and not force_refresh:
+        logger.info(f"Mcap history cached at {MCAP_HISTORY_PARQUET}")
+        return pd.read_parquet(MCAP_HISTORY_PARQUET)
+
+    c = FMPClient()
+    rows: list[dict] = []
+    n = len(universe)
+    for i, sym in enumerate(universe["symbol"]):
+        try:
+            data = c.get("historical-market-capitalization",
+                         params={"symbol": sym, "limit": 6000,
+                                 "from": PRICE_START, "to": PRICE_END})
+            for r in data:
+                rows.append({"symbol": sym, "date": r.get("date"),
+                             "marketCap": r.get("marketCap")})
+        except Exception as e:
+            logger.warning(f"  mcap history fail for {sym}: {e}")
+        if (i + 1) % 25 == 0:
+            logger.info(f"  mcap history: {i + 1}/{n}")
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
+    df.to_parquet(MCAP_HISTORY_PARQUET, index=False)
+    logger.info(f"Mcap history saved: {len(df):,} rows for {df['symbol'].nunique()} tickers")
+    return df
+
+
+# --------------------------------------------------------------------------
 # Step 4: Free float from Yahoo Finance
 # --------------------------------------------------------------------------
 def pull_freefloat(universe: pd.DataFrame, *, force_refresh: bool = False
@@ -216,6 +251,10 @@ def main() -> None:
     logger.info("\n=== Step 3: pulling fundamentals ===")
     fundamentals = pull_fundamentals(universe)
     logger.info(f"Fundamentals: {len(fundamentals):,} rows, {fundamentals['symbol'].nunique()} unique tickers")
+
+    logger.info("\n=== Step 3b: pulling historical market cap ===")
+    mcap_hist = pull_mcap_history(universe)
+    logger.info(f"Mcap history: {len(mcap_hist):,} rows, {mcap_hist['symbol'].nunique()} unique tickers")
 
     logger.info("\n=== Step 4: pulling free-float (Yahoo) ===")
     freefloat = pull_freefloat(universe)
