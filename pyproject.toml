@@ -20,12 +20,10 @@ dependencies = [
     "pandas>=2.2",
     "scipy>=1.13",
     "pyarrow>=16.0",        # Parquet IO for the data lake
-
     # --- Data acquisition (Financial Modeling Prep REST API) ---
     "requests>=2.32",
     "httpx>=0.27",
     "tenacity>=8.3",        # Robust retry / backoff for the API client
-
     # --- Configuration & ergonomics ---
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
@@ -33,29 +31,25 @@ dependencies = [
     "loguru>=0.7",
     "rich>=13.7",
     "tqdm>=4.66",
-
     # --- Machine learning ---
     "scikit-learn>=1.5",
     "lightgbm>=4.3",
     "xgboost>=2.0",
     "shap>=0.46",          # Model explainability (0.46+ supports Python 3.13)
-
     # --- Statistics ---
     "statsmodels>=0.14",
-
     # --- Visualisation ---
     "matplotlib>=3.9",
     "seaborn>=0.13",
     "plotly>=5.22",
     "kaleido>=0.2.1",      # Static export of Plotly figures for the paper
-
     # --- Performance analytics ---
     "quantstats>=0.0.62",
-
     # --- Notebooks ---
     "jupyterlab>=4.2",
     "ipywidgets>=8.1",
     "nbformat>=5.10",
+    "yfinance>=1.4.0",
 ]
 
 [project.optional-dependencies]

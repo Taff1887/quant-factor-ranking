@@ -2781,6 +2781,7 @@ dependencies = [
     { name = "tenacity" },
     { name = "tqdm" },
     { name = "xgboost" },
+    { name = "yfinance" },
 ]
 
 [package.optional-dependencies]
@@ -2825,6 +2826,7 @@ requires-dist = [
     { name = "tenacity", specifier = ">=8.3" },
     { name = "tqdm", specifier = ">=4.66" },
     { name = "xgboost", specifier = ">=2.0" },
+    { name = "yfinance", specifier = ">=1.4.0" },
 ]
 provides-extras = ["dev"]
 

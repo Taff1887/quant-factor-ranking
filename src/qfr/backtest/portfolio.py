@@ -404,13 +404,17 @@ def cost_sensitivity_table(strats: list[dict], spy: pd.Series,
     """For each (strategy, cost level) report CAGR/vol/Sharpe/MaxDD/turnover/cost-drag/alpha."""
     rows = []
     for s in strats:
-        gross_alpha, beta = capm(s["gross"], spy)
+        # capm returns (beta, alpha_annualised_as_decimal). gross_alpha_pct is the
+        # annualised Jensen alpha of the gross series, expressed as a percent.
+        beta, gross_alpha_decimal = capm(s["gross"], spy)
+        gross_alpha_pct = gross_alpha_decimal * 100 if pd.notna(gross_alpha_decimal) else np.nan
         for c_bps in cost_levels_bps:
             cps = c_bps / 10000
             net = s["gross"] - s["total_traded"] * cps
-            cost_drag_ann = (s["total_traded"] * cps).mean() * ANN
+            cost_drag_ann = (s["total_traded"] * cps).mean() * ANN  # decimal
+            cost_drag_pct = cost_drag_ann * 100
             m = perf_metrics(net.dropna())
-            net_alpha = (gross_alpha - cost_drag_ann * 100) if pd.notna(gross_alpha) else np.nan
+            net_alpha_pct = (gross_alpha_pct - cost_drag_pct) if pd.notna(gross_alpha_pct) else np.nan
             rows.append({
                 "strategy": s["name"], "cost_bps": c_bps,
                 "CAGR_%": m.get("CAGR", np.nan) * 100,
@@ -418,8 +422,8 @@ def cost_sensitivity_table(strats: list[dict], spy: pd.Series,
                 "Sharpe": m.get("Sharpe", np.nan),
                 "max_drawdown_%": m.get("max_drawdown", np.nan) * 100,
                 "ann_turnover_%": s["total_traded"].mean() * 0.5 * ANN * 100,  # one-way ann
-                "cost_drag_%": cost_drag_ann * 100,
-                "Jensen_alpha_%": net_alpha if pd.notna(net_alpha) else np.nan,
+                "cost_drag_%": cost_drag_pct,
+                "Jensen_alpha_%": net_alpha_pct,
                 "beta": beta,
             })
     return pd.DataFrame(rows)

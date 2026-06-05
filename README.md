@@ -562,97 +562,127 @@ uv run python -m qfr.backtest.portfolio
 #    EW vs IC vs IC-IR vs t-squared, with strict no-look-ahead and shrinkage
 uv run python -m qfr.backtest.composite_variants
 
-# 8. (Optional) ASX 200 extension — same methodology applied to Australian equities
-#    Re-uses the PIT panel from the companion Short King 2.0 project
-uv run python -m qfr.backtest.asx_extension
+# 8. (Optional) ASX 200 extension — same methodology, fully independent data pipeline
+#    Pulls fresh ASX universe + prices + fundamentals from FMP, free-float from Yahoo,
+#    builds the PIT panel, then runs the full set of diagnostics.
+uv run python -m qfr.backtest.asx_pull_data    # universe, prices, fundamentals, free-float
+uv run python -m qfr.backtest.asx_assemble     # PIT-join, free-float-adjust, top-200 filter
+uv run python -m qfr.backtest.asx_extension    # IC + portfolios + diagnostics
 ```
 
 ---
 
 ## 13. Cross-market extension — ASX 200
 
-Same five-factor methodology, same code path, applied to Australian large-caps (2010–2026, monthly rebalance, net of 10 bps/side). Re-uses the point-in-time panel built and maintained in the companion project [Short King 2.0](https://github.com/Taff1887/short-king-2.0) (500 ASX tickers, weekly cadence with `AsOfDate` / `ReleaseDate` filing-date lag), resampled to monthly and filtered each month to the **top 200 by market capitalisation** as a PIT proxy for the S&P/ASX 200 (FMP does not publish a historical-ASX 200-constituent endpoint, so cap-rank-200 is the cleanest stand-in).
+Same five-factor methodology applied to Australian large-caps, with an **independent, institutionally-realistic data pipeline**:
 
-Universe: 378 unique tickers ever in the top-200-by-cap from 2010-06 through 2026-04 (191 months). Benchmark: `IOZ.AX` (iShares Core S&P/ASX 200 ETF), dividend-adjusted total return.
+- **Fresh universe from FMP**: top-250 ASX ordinaries by market cap (current), refreshed each month to PIT-top-200 by market cap. Filters out ETFs, funds, preference shares, and non-ASX cross-listings via the FMP `company-screener`. Average rank-200 cutoff over the sample is ~$1.3 B AUD — sensible for the practical S&P/ASX 200 lower bound.
+- **Fresh prices from FMP** (`historical-price-eod/dividend-adjusted`): daily dividend-adjusted close, resampled to month-end, forward returns winsorised at ±100 % to handle unadjusted corporate actions (standard institutional guard against data errors).
+- **Fresh fundamentals from FMP** (`key-metrics`, `financial-growth`, `cash-flow-statement`): PIT-joined via `acceptedDate` filing-date stamp, falling back to fiscal-date + 90 days when missing.
+- **Free-float adjustment from Yahoo Finance**: each ticker's current `floatShares` / `sharesOutstanding` is used to discount its market cap for cap-weighting. This matches how the real S&P/ASX 200 index weights itself — and meaningfully changes the universe ranking (average free-float ratio across the universe is ~0.81, with banks/miners near 1.0 and founder-held names like REH, GQG, TPG in the 0.25-0.35 range).
+- **Realistic transaction costs**: headline results net of **25 bps/side** (vs the 10 bps used for the more-liquid S&P 500). Cost sensitivity also reported at 10 / 50 bps.
+- **Diagnostics in parity with the S&P 500 model**: cost sensitivity sweep, gross-vs-net cost decomposition, turnover/holding-period decomposition, sector-neutral LS variant.
+
+No part of the Short King 2.0 panel is used. Universe coverage: 243 unique tickers ever in the PIT-top-200 from 2009-12 through 2026-04 (197 months). Benchmark: `IOZ.AX` (iShares Core S&P/ASX 200 ETF), dividend-adjusted total return.
 
 ### Per-factor rank IC
 
 | Factor | IC 1m | t-stat | Hit rate | IC 3m | t-stat |
 |---|---|---|---|---|---|
-| ROIC | 3.93 % | 4.30 | 64.4 % | 5.60 % | 6.24 |
-| ROE | 5.12 % | 5.07 | 63.4 % | 6.76 % | 7.26 |
-| **FCF yield** | **5.68 %** | **6.49** | **68.1 %** | **8.37 %** | **8.89** |
-| Revenue growth | 2.41 % | 3.05 | 59.2 % | 3.42 % | 4.60 |
-| EPS growth | 4.27 % | 5.42 | 64.4 % | 5.43 % | 7.20 |
+| ROIC | 4.74 % | 6.11 | 71.1 % | 5.78 % | 7.36 |
+| ROE | 4.92 % | 5.84 | 67.5 % | 5.95 % | 7.11 |
+| **FCF yield** | **6.24 %** | **8.07** | **70.6 %** | **7.99 %** | **9.22** |
+| Revenue growth | 3.12 % | 4.34 | 63.5 % | 3.91 % | 5.78 |
+| EPS growth | 5.28 % | 7.64 | 72.1 % | 6.57 % | 9.29 |
 
-Every individual factor is significant at **|t| > 3**, with FCF yield the strongest — a much sharper picture than the S&P 500 screen where individual factors mostly sat at |t| < 2.
+Every individual factor is significant at **|t| > 4**, with FCF yield strongest — a markedly sharper picture than the S&P 500 screen where individual factors mostly sat at |t| < 2.
 
 ### Composite rank IC
 
 | Horizon | Mean IC | IC IR | t-stat | Hit rate |
 |---|---|---|---|---|
-| 1 month | 5.74 % | 0.47 | **6.50** | 67.5 % |
-| 3 months | 7.22 % | 0.62 | **8.50** | 68.8 % |
-| 6 months | 8.34 % | 0.73 | **9.98** | 78.0 % |
-| 12 months | 8.01 % | 0.73 | **9.73** | 78.3 % |
+| 1 month | 6.88 % | 0.64 | **8.98** | 73.1 % |
+| 3 months | 8.72 % | 0.80 | **11.21** | 79.0 % |
+| 6 months | **9.92 %** | **0.91** | **12.64** | **80.7 %** |
+| 12 months | 8.71 % | 0.78 | **10.58** | 78.5 % |
 
-For comparison, the S&P 500 composite IC was 1.37 % @ 1m (t = 2.44), 2.58 % @ 3m (t = 4.41). The ASX composite is roughly **3-4× the IC** and **~2× the t-stat** of the US equivalent.
+For comparison, the S&P 500 composite IC was 1.37 % @ 1m (t = 2.44), 2.58 % @ 3m (t = 4.41). The ASX composite is roughly **3-5× the IC** and **~2-3× the t-stat** of the US equivalent.
 
-### Portfolio results (net of 10 bps/side, vs IOZ.AX)
+![ASX rank IC bars](charts/asx_ic_bars.png)
+
+### Portfolio results (net of 25 bps/side, vs IOZ.AX)
 
 ![ASX cumulative growth](charts/asx_cumulative.png)
 
 | Strategy | CAGR | Vol | Sharpe | Max DD | β vs IOZ | **CAPM α** | Turnover |
 |---|---|---|---|---|---|---|---|
-| **Top decile CW** | **20.7 %** | 31.9 % | 0.73 | −49.8 % | 0.92 | **+15.10 %** | 337 % |
-| Top decile EW | 20.2 % | 20.4 % | 1.01 | −32.1 % | 1.00 | +11.25 % | 263 % |
-| **Top quintile EW** | 18.7 % | 17.2 % | **1.09** | −32.6 % | 1.02 | **+9.46 %** | 227 % |
-| Top quintile CW | 13.0 % | 22.0 % | 0.67 | −38.9 % | 0.85 | +7.52 % | 281 % |
-| LS Q1−Q5 EW (dollar-neutral) | **16.3 %** | 14.6 % | **1.11** | −23.2 % | −0.23 | **+19.62 %** | 433 % |
+| **Top decile EW** | **27.9 %** | 19.2 % | 1.39 | −32.1 % | 1.12 | **+17.5 %** | 226 % |
+| **Top quintile EW** | 26.4 % | 17.1 % | **1.47** | −33.5 % | 1.10 | **+16.4 %** | 197 % |
+| Top decile CW (free-float-adj) | 13.4 % | 18.2 % | 0.79 | −30.6 % | 1.14 | +6.98 % | 301 % |
+| Top quintile CW (free-float-adj) | 12.7 % | 15.6 % | 0.85 | −24.6 % | 1.00 | +6.36 % | 259 % |
+| LS Q1−Q5 EW (dollar-neutral) | 10.4 % | 15.8 % | 0.71 | −34.4 % | −0.14 | **+14.0 %** | 347 % |
+| LS Q1−Q5 EW (sector-neutral) | 9.2 % | 12.8 % | **0.75** | **−22.5 %** | −0.20 | **+11.1 %** | 409 % |
 | **IOZ.AX (benchmark)** | 7.5 % | 12.9 % | 0.63 | −26.6 % | 1.00 | 0 | — |
 
-![ASX rank IC bars](charts/asx_ic_bars.png)
+The **equal-weighted top-quintile / top-decile books are the main results**, generating Sharpe ~1.4-1.5 with +16-17 % annualised Jensen alpha vs IOZ. The free-float-adjusted cap-weighted books are much weaker (12-13 % CAGR vs 27-28 % for EW) — concrete evidence of the documented small-cap premium within the ASX 200 (equal-weighting the top quintile harvests it; cap-weighting concentrates back in the megacaps and gives most of it back).
+
+### Cost sensitivity
+
+| Strategy | Sharpe (10 bps) | Sharpe (25 bps) | Sharpe (50 bps) | α (10 bps) | α (25 bps) | α (50 bps) |
+|---|---|---|---|---|---|---|
+| Top decile EW | 1.42 | 1.39 | 1.34 | +18.1 % | +17.4 % | +16.3 % |
+| Top quintile EW | 1.50 | 1.47 | 1.42 | +17.0 % | +16.4 % | +15.4 % |
+| Top decile CW (ff-adj) | 0.83 | 0.79 | 0.71 | +7.81 % | +6.91 % | +5.40 % |
+| Top quintile CW (ff-adj) | 0.90 | 0.85 | 0.77 | +7.12 % | +6.34 % | +5.05 % |
+| LS Q1−Q5 EW | 0.78 | 0.71 | 0.59 | +15.0 % | +14.0 % | +12.2 % |
+| LS Q1−Q5 EW (sector-neutral) | 0.85 | 0.75 | 0.59 | +12.3 % | +11.1 % | +9.05 % |
+
+![ASX cost sensitivity](charts/asx_cost_sensitivity.png)
+
+Long-only Sharpe is highly robust to costs (1.42 → 1.34 going from 10 to 50 bps/side). The LS books decay faster — at 50 bps Sharpe drops to ~0.6 — but stay clearly positive even under stress assumptions. **Cost drag is not what's limiting these strategies; the signal is strong enough to absorb realistic ASX trading costs.**
+
+### Turnover & holding period
+
+| Strategy | Monthly turnover (one-way) | Long leg | Short leg | Avg holding period |
+|---|---|---|---|---|
+| Top decile EW | 18.9 % | 18.9 % | — | 5.3 months |
+| Top quintile EW | 16.4 % | 16.4 % | — | 6.1 months |
+| Top decile CW (ff-adj) | 25.1 % | 25.1 % | — | 4.0 months |
+| Top quintile CW (ff-adj) | 21.6 % | 21.6 % | — | 4.6 months |
+| LS Q1−Q5 EW | 28.9 % | 16.4 % | 12.5 % | 3.5 months |
+| LS sector-neutral | 34.1 % | 17.0 % | 17.0 % | 2.9 months |
+
+Long-only top-quintile EW holds positions ~6 months on average — slow enough to be operationally tractable. LS variants turn over faster (~3 months) but well within practical limits.
+
+### Gross-vs-net cost decomposition (at 25 bps/side)
+
+| Strategy | Gross CAGR | Cost drag | Net CAGR | Gross Sharpe | Net Sharpe |
+|---|---|---|---|---|---|
+| Top decile EW | 29.3 % | 1.13 % | 27.9 % | 1.44 | 1.39 |
+| Top quintile EW | 27.6 % | 0.98 % | 26.4 % | 1.52 | 1.47 |
+| Top decile CW (ff-adj) | 15.1 % | 1.51 % | 13.4 % | 0.87 | 0.79 |
+| Top quintile CW (ff-adj) | 14.1 % | 1.30 % | 12.7 % | 0.93 | 0.85 |
+| LS Q1−Q5 EW | 12.3 % | 1.74 % | 10.4 % | 0.82 | 0.71 |
+| LS sector-neutral | 11.4 % | 2.04 % | 9.2 % | 0.92 | 0.75 |
 
 ### Why the ASX numbers are so much stronger than the S&P 500 numbers
 
-This is consistent with what the academic literature on Australian equities consistently finds — the ASX is structurally less efficient than the US large-cap universe:
+Consistent with what the academic literature on Australian equities documents — the ASX is structurally less efficient than the US large-cap universe:
 
-- **Smaller, less analyst-covered names.** Median S&P 500 stock is followed by ~20 sell-side analysts; median ASX 200 name is followed by ~6.
-- **Home-bias in institutional money.** Australian super funds hold a heavy domestic equity overweight, and most are mandate-constrained to broad-market exposure rather than active factor strategies, leaving more anomaly premium uncaptured.
+- **Smaller, less analyst-covered names.** Median S&P 500 stock is followed by ~20 sell-side analysts; median ASX 200 name by ~6.
+- **Home-bias in institutional money.** Australian super funds hold heavy domestic equity overweights and are mostly mandate-constrained to broad-market exposure, leaving anomaly premia uncaptured.
 - **Less arbitrage capital.** The pool of dedicated quant arb capital is materially smaller per dollar of market cap than in the US.
-- **Stronger small-cap premium within the index.** This shows up clearly in the spread between `Top quintile EW` (18.7 % CAGR) and `Top quintile CW` (13.0 %): equal-weighting within the top quintile harvests the small-cap component, cap-weighting concentrates back in the megacaps and gives most of that premium back.
-- **Stronger quality/value spread between top and bottom of the cross-section.** The LS Q1-Q5 spread reaches a level (16.3 % CAGR, 1.11 Sharpe, +19.6 % α) that simply does not exist in the S&P 500 LS variants (≤2.5 % CAGR, ≤0.32 Sharpe).
-
-### Robustness checks
-
-**1. Full ~500-ticker universe.** Running the same pipeline on the unfiltered ASX universe (rather than just the top-200 by market cap) produces an even stronger signal — broader cross-sectional dispersion means more rank IC to harvest:
-
-| Universe | Composite IC 1m (t) | Composite IC 3m (t) | Composite IC 12m (t) | Top decile EW α | LS Q1−Q5 EW Sharpe / α |
-|---|---|---|---|---|---|
-| **Top 200 by cap (headline)** | 5.74 % (6.50) | 7.22 % (8.50) | 8.01 % (9.73) | +11.25 % | 1.11 / +19.6 % |
-| Full ~500 universe | **6.33 %** (7.13) | **8.16 %** (9.56) | **9.39 %** (11.52) | +9.91 % | 0.73 / +16.1 % |
-
-The full universe has higher composite IC (the small-cap tail adds dispersion), but the LS Sharpe is lower (the bottom decile of the full universe contains volatile micro-caps that lift LS volatility more than they lift LS return). Long-only top-decile / top-quintile alphas are essentially unchanged. The top-200 cut is the cleaner economic interpretation since it stays within the practically tradeable ASX 200 universe.
-
-**2. Fundamentals-lag sensitivity (PIT paranoia control).** The Short King 2.0 panel carries each fundamental value forward from its filing date until the next release, but to rule out any subtle look-ahead we re-ran the IC with extra months of lag artificially applied to the factor inputs:
-
-| Extra lag | IC 1m (t) | IC 3m (t) | IC 6m (t) | IC 12m (t) |
-|---|---|---|---|---|
-| **+0m (baseline)** | 5.74 % (6.50) | 7.22 % (8.50) | 8.34 % (9.98) | 8.01 % (9.73) |
-| +1m | 4.23 % (5.04) | 5.85 % (7.01) | 7.49 % (8.92) | 6.68 % (8.22) |
-| +2m | 3.18 % (3.80) | 5.69 % (6.65) | 6.80 % (8.51) | 6.10 % (7.72) |
-| +3m | 3.52 % (4.22) | 6.27 % (7.77) | 6.32 % (8.30) | 5.87 % (7.67) |
-
-If the baseline had look-ahead the IC would collapse toward zero when we add lag. Instead the 1-month IC degrades gradually (consistent with normal signal decay — fresher data is more informative than 3-month-old data), and the longer-horizon ICs (6m, 12m) are remarkably stable — they barely budge from the baseline. At even +3 months of extra lag the composite IC remains highly significant (|t| > 7) and still ~2-3× the magnitude of the S&P 500 baseline composite. **The ASX edge is real, not a PIT artifact.**
+- **Stronger small-cap premium within the index.** The 14 percentage-point gap between Top quintile EW (26.4 % CAGR) and Top quintile CW (12.7 %) is the small-cap premium being harvested by equal-weighting and given back by cap-weighting.
+- **Wider cross-sectional dispersion of factor scores.** The 5-factor composite at 1m gets to t-stat **8.98** on ASX (vs 2.44 on S&P 500) — same methodology, dramatically more signal.
 
 ### Caveats
 
-- **Universe is not a strict S&P/ASX 200 constituent reconstruction.** We use top-200-by-market-cap at each month-end as a PIT proxy. Real ASX 200 membership has additional liquidity/free-float screens not applied here.
-- **The 500-ticker source universe** comes from Short King 2.0 (ASIC-reportable shorts + ASX listings) — so some selection bias may remain at the long tail (small caps that never appeared in ASIC's short reporting could be absent). For the cap-weighted top-200 cut this matters very little.
-- **No cost-sensitivity / turnover / neutrality diagnostics here** (those analyses are in §8 for the S&P 500 model) — this section is intentionally a results-only condensation.
-- **Cost drag is low** (≤0.9 %/yr at 10 bps for the long-only books) but real-world AUS market impact + spread for small-caps is meaningfully higher than US; a more realistic implementation cost (~25-50 bps/side) would compress the long-only α by 1-3 %/yr and could materially compress the LS strategy.
+- **Universe is top-200-by-market-cap each month as a PIT proxy for the S&P/ASX 200.** FMP does not publish a `historical-asx200-constituent` endpoint, so strict constituent reconstruction is not possible from this data source. The real index applies additional liquidity / free-float screens (minimum 6-month listing, minimum 0.04 % free float, etc.) that our cap-rank proxy does not enforce.
+- **Free-float ratio is taken from current Yahoo data and applied as a constant**, since historical float series are not in FMP / Yahoo. This correctly captures *relative* free float across stocks today but doesn't capture changes in free float over time (e.g., founders selling down).
+- **Forward returns are winsorised at ±100 %** to suppress unadjusted-corporate-action data errors (one such event in our raw data — ELV.AX June 2015 — would otherwise distort the LS by itself). Standard institutional practice.
+- **No formal liquidity screen** (no minimum ADV or bid-ask filter), so trading the smaller names in the top-200 at scale would face real-world market impact above the 25 bps/side cost assumption. Cost sensitivity at 50 bps approximates the worst-case impact.
 
-Artefacts: [`reports/asx_per_factor_ic.csv`](reports/asx_per_factor_ic.csv), [`reports/asx_composite_ic.csv`](reports/asx_composite_ic.csv), [`reports/asx_summary_long_only.csv`](reports/asx_summary_long_only.csv), [`reports/asx_summary_long_short.csv`](reports/asx_summary_long_short.csv), [`reports/asx_*_full_universe.csv`](reports/asx_composite_ic_full_universe.csv), [`reports/asx_lag_sensitivity.csv`](reports/asx_lag_sensitivity.csv). Code: [`src/qfr/backtest/asx_extension.py`](src/qfr/backtest/asx_extension.py).
+Artefacts: [`reports/asx_per_factor_ic.csv`](reports/asx_per_factor_ic.csv), [`reports/asx_composite_ic.csv`](reports/asx_composite_ic.csv), [`reports/asx_summary_long_only.csv`](reports/asx_summary_long_only.csv), [`reports/asx_summary_long_short.csv`](reports/asx_summary_long_short.csv), [`reports/asx_cost_sensitivity.csv`](reports/asx_cost_sensitivity.csv), [`reports/asx_gross_vs_net.csv`](reports/asx_gross_vs_net.csv), [`reports/asx_turnover.csv`](reports/asx_turnover.csv). Code: [`src/qfr/backtest/asx_pull_data.py`](src/qfr/backtest/asx_pull_data.py), [`asx_assemble.py`](src/qfr/backtest/asx_assemble.py), [`asx_extension.py`](src/qfr/backtest/asx_extension.py).
 
 ---
 
