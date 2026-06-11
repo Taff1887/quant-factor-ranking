@@ -23,6 +23,7 @@
 12. [Honest caveats](#11-honest-caveats)
 13. [Repo structure & how to reproduce](#12-repo-structure--how-to-reproduce)
 14. [Cross-market extension — ASX 200](#13-cross-market-extension--asx-200)
+15. [Machine-learning ranking — does a non-linear model beat the linear composite?](#14-machine-learning-ranking--does-a-non-linear-model-beat-the-linear-composite)
 
 ---
 
@@ -568,6 +569,11 @@ uv run python -m qfr.backtest.composite_variants
 uv run python -m qfr.backtest.asx_pull_data    # universe, prices, fundamentals, free-float
 uv run python -m qfr.backtest.asx_assemble     # PIT-join, free-float-adjust, top-200 filter
 uv run python -m qfr.backtest.asx_extension    # IC + portfolios + diagnostics
+
+# 9. (Optional) Walk-forward ML ranking — LightGBM / XGBoost vs the linear composite
+#    Expanding-window walk-forward with annual refit + 1-month embargo, OOS IC,
+#    portfolio backtest, feature importance + SHAP.
+uv run python -m qfr.backtest.ml_ranking
 ```
 
 ---
@@ -694,6 +700,66 @@ The size of the gap between EW (Sharpe 1.4-1.5, biased) and CW (Sharpe 0.86, cle
 The CW (free-float-adjusted) books are the closest thing to a defensible upper-bound estimate of what this strategy could earn on a real S&P/ASX 200 universe. The EW books are presented for transparency about the bias mechanism, not as a tradeable result.
 
 Artefacts: [`reports/asx_per_factor_ic.csv`](reports/asx_per_factor_ic.csv), [`reports/asx_composite_ic.csv`](reports/asx_composite_ic.csv), [`reports/asx_summary_long_only.csv`](reports/asx_summary_long_only.csv), [`reports/asx_summary_long_short.csv`](reports/asx_summary_long_short.csv), [`reports/asx_cost_sensitivity.csv`](reports/asx_cost_sensitivity.csv), [`reports/asx_gross_vs_net.csv`](reports/asx_gross_vs_net.csv), [`reports/asx_turnover.csv`](reports/asx_turnover.csv). Code: [`src/qfr/backtest/asx_pull_data.py`](src/qfr/backtest/asx_pull_data.py), [`asx_assemble.py`](src/qfr/backtest/asx_assemble.py), [`asx_extension.py`](src/qfr/backtest/asx_extension.py).
+
+---
+
+## 14. Machine-learning ranking — does a non-linear model beat the linear composite?
+
+The linear composite weights every factor equally. A natural question — and the one quant desks actually ask — is whether a non-linear model that can learn **factor interactions** (e.g. "cheap *and* improving margins" being worth more than the sum of the parts) extracts more cross-sectional signal. We test gradient-boosted trees (**LightGBM** and **XGBoost**) against the linear composite, **strictly out-of-sample under a walk-forward scheme**.
+
+### Setup
+
+- **Features (10):** the 7 family composites (value, quality, momentum, growth, risk, sentiment, size) + short-term reversal, 12−1 momentum, 12-month volatility — each cross-sectionally percentile-ranked within month so they're stationary across time.
+- **Target:** 1-month forward return, **cross-sectionally demeaned** (each stock minus that month's universe mean) so the model optimises *relative* performance rather than wasting capacity predicting the common market move. Demeaning doesn't change the IC evaluation — ranking by demeaned return is identical to ranking by raw return within a month.
+- **Walk-forward, no look-ahead:** expanding training window, **annual refit**, **1-month embargo**. At each refit anchored to a test block starting at month *t*, we train only on observations from months ≤ *t*−2 (the embargo drops month *t*−1, whose label isn't realised until *t*), then predict months *t* … *t*+11 strictly out-of-sample. Early-stopping validation uses the most recent 12 months of the training window — still strictly historical. Minimum 60-month initial window ⇒ OOS period **2015-01 → 2026-04 (135 months)**.
+- **Baseline:** the linear EW composite, evaluated on the **identical** OOS window and rows.
+
+### Result: the trees do *not* beat the linear composite
+
+![OOS IC comparison](charts/ml_ic_comparison.png)
+
+| Model | OOS rank IC (1m) | IC IR | t-stat | Hit rate |
+|---|---|---|---|---|
+| **Linear composite** | **1.13 %** | **0.094** | **1.09** | **54.1 %** |
+| LightGBM | 0.46 % | 0.042 | 0.49 | 51.1 % |
+| XGBoost | 0.24 % | 0.025 | 0.29 | 50.4 % |
+
+On the realised portfolios (top-decile cap-weighted, net of 10 bps/side, vs SPY over the same OOS window) the ranking is the same — the linear composite wins on alpha:
+
+| Strategy (top-decile CW, OOS) | CAGR | Sharpe | CAPM α |
+|---|---|---|---|
+| **Linear composite** | **17.9 %** | **0.94** | **+3.50 %** |
+| LightGBM | 16.5 % | 0.85 | +0.86 % |
+| XGBoost | 13.7 % | 0.71 | −2.30 % |
+
+![ML cumulative growth](charts/ml_cumulative.png)
+
+### Why — and why this is the *expected* result
+
+This is not a bug, and I stress-tested it before believing it:
+
+- **It's not look-ahead** flattering the linear model — look-ahead would inflate the *trees* (they have the free parameters to exploit it), yet they *under*-perform. The walk-forward harness trains on months ≤ *t*−2 and tests on months ≥ *t* with an embargo gap.
+- **It's not over-regularisation hobbling the trees** — an aggressive, deep, *unregularised* LightGBM (depth 8, 63 leaves, no L1/L2) scores OOS IC 0.56 %, still well below the linear 1.13 %. Predictions vary cross-sectionally (per-month dispersion ≈ 0.001), so the models aren't producing degenerate constant output.
+
+The economics behind it are well documented (Gu, Kelly & Xiu 2020 and the broader factor-ML literature):
+
+1. **Monthly stock returns are ~95 % noise.** Trees have the capacity to fit that noise in-sample and pay for it out-of-sample; the equal-weight linear composite is a maximally-regularised model that *cannot* overfit.
+2. **Factor premia are largely additive and monotone.** The interaction structure trees are good at capturing is weak in this data, so there's little for them to gain and a lot of variance to lose.
+3. **Equal-weight is a powerful zero-estimation prior** — the same DeMiguel-Garlappi-Uppal "1/N is hard to beat" result that showed up in the factor-weighting variants (§6.3), now reappearing one level up at the model-class choice.
+
+### What the model leans on (feature importance + SHAP)
+
+![Feature importance](charts/ml_feature_importance.png)
+
+Averaged across refits, LightGBM's gain importance concentrates in the **price-based, fast-moving** signals — 12−1 momentum (24 %), short-term reversal (18 %), and 12-month volatility (16 %) together account for ~58 % — with the slower fundamental composites (value, quality, growth) each contributing ~5 %. That's consistent with the per-factor screen: at a 1-month horizon the price-based factors carry most of the cross-sectional information, while the fundamental factors are slower-moving and matter more at the 3–12 month horizons (§6.2).
+
+![SHAP summary](charts/ml_shap_summary.png)
+
+### Takeaway
+
+For this universe and feature set, **the linear equal-weight composite remains the model of record** — it matches or beats gradient-boosted trees out-of-sample while being simpler, fully transparent, and free of estimation risk. This is the honest and common finding; the value of the exercise is the *methodology* (a leak-free walk-forward harness with embargo, demeaned cross-sectional target, and a like-for-like OOS comparison), and a documented negative result is more useful than an over-fit positive one. Where ML would be expected to help — and the natural next step — is a much larger feature universe (50–100+ signals), a longer history, and/or longer holding horizons, which is where the literature finds trees start to add value.
+
+Artefacts: [`reports/ml_oos_ic.csv`](reports/ml_oos_ic.csv), [`reports/ml_portfolio_summary.csv`](reports/ml_portfolio_summary.csv), [`reports/ml_feature_importance_lgbm.csv`](reports/ml_feature_importance_lgbm.csv), [`reports/ml_feature_importance_xgb.csv`](reports/ml_feature_importance_xgb.csv). Code: [`src/qfr/backtest/ml_ranking.py`](src/qfr/backtest/ml_ranking.py).
 
 ---
 

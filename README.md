@@ -47,6 +47,9 @@ uv run python -m qfr.backtest.composite_variants
 uv run python -m qfr.backtest.asx_pull_data
 uv run python -m qfr.backtest.asx_assemble
 uv run python -m qfr.backtest.asx_extension
+
+# Optional: walk-forward ML ranking (LightGBM/XGBoost vs linear composite)
+uv run python -m qfr.backtest.ml_ranking
 ```
 
 ---
